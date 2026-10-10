@@ -7,6 +7,7 @@ def edit(path, fn):
     if n!=s: open(p,'w').write(n); print('fixed',path)
     else: print('nochange',path)
 def rep(s, old, new, must=True, count=1):
+    if new in s and old not in s: return s
     if old not in s:
         if must: raise SystemExit('PATTERN NOT FOUND:\n'+old[:300])
         return s

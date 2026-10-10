@@ -45,7 +45,7 @@ function start()
     fails(function() graphics.bloom = { strenght = 1 } end, "unknown setting 'strenght'")
     fails(function() graphics.bloom = { strength = "big" } end, "graphics.bloom.strength")
     fails(function() graphics.dof = 5 end, "expected a table")
-    fails(function() graphics.vignette = { color = 3 } end, "graphics.vignette.color")
+    fails(function() graphics.vignette = { color = true } end, "graphics.vignette.color")
 
     graphics.bloom = false
     assert(graphics.bloom == nil)
