@@ -41,15 +41,23 @@ pub fn run_frame<G: Game + ?Sized>(game: &mut G, world: &mut World, real_dt: f32
     world.physics.events.clear();
     let steps = world.time.fixed_steps();
     let fixed = world.time.fixed_dt;
-    for _ in 0..steps {
+    for i in 0..steps {
+        world.input.begin_fixed_step(i == 0);
+        world.scene.begin_interp_step();
         game.fixed_update(world, fixed);
         crate::physics::step(world, fixed);
+        world.scene.end_interp_step();
+    }
+    if steps > 0 {
+        world.input.end_fixed_steps();
     }
     let dt = world.time.dt;
+    world.ui.begin(&world.canvas, &world.input);
     game.update(world, dt);
     crate::animation::update(world, dt);
     game.late_update(world, dt);
     game.draw(world);
+    world.ui.end();
     world.input.end_frame();
     crate::audio::flush(world);
 }

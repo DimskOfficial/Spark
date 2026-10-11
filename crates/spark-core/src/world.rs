@@ -39,6 +39,10 @@ pub struct World {
     pub animator: Animator,
     /// Fullscreen / title requests for the window (ignored in headless runs).
     pub window: WindowSettings,
+    /// Debug overlay (FPS, GPU, scene stats). Toggle with F1 in the runner.
+    pub debug: crate::debug::DebugOverlay,
+    /// Immediate-mode UI state (buttons, sliders, panels).
+    pub ui: crate::ui::Ui,
     quit: bool,
 }
 
@@ -92,9 +96,12 @@ impl World {
         self.physics.gravity = Physics::default().gravity;
         self.physics.enabled = true;
         self.audio.stop_all(0.0);
+        self.audio.clear_cache();
         self.assets.clear();
         self.animator.clear();
         self.render = RenderSettings::default();
         self.canvas.reset();
+        self.debug = crate::debug::DebugOverlay::default();
+        self.ui = crate::ui::Ui::default();
     }
 }

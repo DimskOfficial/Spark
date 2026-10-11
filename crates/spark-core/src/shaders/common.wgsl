@@ -25,6 +25,12 @@ struct Frame {
     fog: vec4<f32>,         // near, far, enabled (0 / 1)
     light_count: vec4<u32>, // x = number of entries in `lights`
     lights: array<Light, 32>,
+    shadow_view_proj: mat4x4<f32>, // world -> sun shadow map clip space
+    shadow: vec4<f32>,      // enabled (0 / 1), 1 / map size, normal offset (m), shadow distance (m)
+    prev_view_proj: mat4x4<f32>, // view_proj of the previous frame (camera motion blur, reprojection)
+    sky_top: vec4<f32>,     // rgb, linear
+    sky_bottom: vec4<f32>,  // rgb, linear
+    sky: vec4<f32>,         // enabled (0 / 1), cubemap blend (0 = no cubemap), lighting strength, cubemap mip count
 };
 
 @group(0) @binding(0) var<uniform> frame: Frame;

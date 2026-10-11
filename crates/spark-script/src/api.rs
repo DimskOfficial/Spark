@@ -44,14 +44,15 @@ fn surface_opts(t: Option<Table>, what: &str) -> LuaResult<Option<SurfaceOpts>> 
 fn keys(name: &str) -> LuaResult<Vec<Key>> {
     Key::resolve(name).ok_or_else(|| {
         rt(format!(
-            "unknown key '{name}' (keys: a-z, 0-9, space, enter, escape, tab, backspace, left, right, up, down, shift, ctrl, alt, f1-f12)"
+            "unknown key '{name}' (keys: a-z, 0-9, punctuation like minus comma slash or \"-\" \",\" \"/\", numpad0-9, f1-f24, all names: {})",
+            Key::names()
         ))
     })
 }
 
 fn button(name: Option<String>) -> LuaResult<MouseButton> {
     let name = name.unwrap_or_else(|| "left".into());
-    MouseButton::from_name(&name).ok_or_else(|| rt(format!("unknown mouse button '{name}' (use \"left\", \"right\", \"middle\")")))
+    MouseButton::from_name(&name).ok_or_else(|| rt(format!("unknown mouse button '{name}' (use \"left\", \"right\", \"middle\", \"back\", \"forward\")")))
 }
 
 fn pad_button(name: &str) -> LuaResult<PadButton> {
@@ -259,6 +260,13 @@ fn install_assets(lua: &Lua, g: &Table) -> LuaResult<()> {
     material.set("color", lua.create_function(|_, c: Value| Ok(LuaMaterial(Material::color(to_color(&c, "Material.color")?))))?)?;
     material.set("unlit", lua.create_function(|_, c: Value| Ok(LuaMaterial(Material::unlit(to_color(&c, "Material.unlit")?))))?)?;
     material.set(
+        "pbr",
+        lua.create_function(|_, (c, metallic, roughness): (Value, Option<f32>, Option<f32>)| {
+            let c = if c.is_nil() { Color::WHITE } else { to_color(&c, "Material.pbr")? };
+            Ok(LuaMaterial(Material::pbr(c, metallic.unwrap_or(0.0), roughness.unwrap_or(0.5))))
+        })?,
+    )?;
+    material.set(
         "texture",
         lua.create_function(|lua, (t, c): (Value, Value)| {
             let bad = || rt("Material.texture: expected a Texture or an image path like \"grass.png\"");
@@ -389,6 +397,15 @@ fn install_scene(lua: &Lua, g: &Table) -> LuaResult<()> {
             with(lua, |w| Ok(w.scene.fog = fog))
         })?,
     )?;
+    g.set(
+        "sky",
+        lua.create_function(|lua, v: Value| {
+            with(lua, |w| {
+                let sky = to_sky(w, &v)?;
+                Ok(w.scene.sky = sky)
+            })
+        })?,
+    )?;
     g.set("dump_scene", lua.create_function(|lua, ()| with(lua, |w| Ok(w.scene.dump())))?)?;
     g.set("quit", lua.create_function(|lua, ()| with(lua, |w| Ok(w.quit())))?)?;
     g.set("time", lua.create_userdata(TimeRef)?)?;
@@ -400,6 +417,8 @@ fn install_input(lua: &Lua, g: &Table) -> LuaResult<()> {
     input.set("down", lua.create_function(|lua, n: String| { let ks = keys(&n)?; with(lua, |w| Ok(ks.iter().any(|k| w.input.down(*k)))) })?)?;
     input.set("pressed", lua.create_function(|lua, n: String| { let ks = keys(&n)?; with(lua, |w| Ok(ks.iter().any(|k| w.input.pressed(*k)))) })?)?;
     input.set("released", lua.create_function(|lua, n: String| { let ks = keys(&n)?; with(lua, |w| Ok(ks.iter().any(|k| w.input.released(*k)))) })?)?;
+    input.set("repeated", lua.create_function(|lua, n: String| { let ks = keys(&n)?; with(lua, |w| Ok(ks.iter().any(|k| w.input.repeated(*k)))) })?)?;
+    input.set("text", lua.create_function(|lua, ()| with(lua, |w| Ok(w.input.text.clone())))?)?;
     input.set("mouse_down", lua.create_function(|lua, b: Option<String>| { let b = button(b)?; with(lua, |w| Ok(w.input.mouse_down(b))) })?)?;
     input.set("mouse_pressed", lua.create_function(|lua, b: Option<String>| { let b = button(b)?; with(lua, |w| Ok(w.input.mouse_pressed(b))) })?)?;
     input.set("mouse_released", lua.create_function(|lua, b: Option<String>| { let b = button(b)?; with(lua, |w| Ok(w.input.mouse_released(b))) })?)?;
@@ -456,6 +475,44 @@ pub(crate) fn install(lua: &Lua) -> LuaResult<()> {
     crate::save::install(lua, &g)?;
     crate::shader::install(lua, &g)?;
     crate::tween::install(lua)?;
+    crate::debug_api::install(lua)?;
+    crate::ui_api::install(lua)?;
     g.set("window", lua.create_userdata(LuaWindow)?)?;
     Ok(())
+}
+
+/// `sky(nil | false | true | { top, bottom, cubemap, blend, lighting })`.
+fn to_sky(w: &mut World, v: &Value) -> LuaResult<Option<spark_core::Sky>> {
+    const KEYS: &str = "top, bottom, cubemap, blend, lighting";
+    let t = match v {
+        Value::Nil | Value::Boolean(false) => return Ok(None),
+        Value::Boolean(true) => return Ok(Some(spark_core::Sky::default())),
+        Value::Table(t) => t,
+        _ => return Err(rt(format!("sky: expected a table {{ {KEYS} }}, true or nil, got {}", v.type_name()))),
+    };
+    let mut sky = spark_core::Sky::default();
+    for pair in t.pairs::<String, Value>() {
+        let (k, x) = pair?;
+        let what = format!("sky.{k}");
+        match k.as_str() {
+            "top" => sky.top = to_color(&x, &what)?,
+            "bottom" => sky.bottom = to_color(&x, &what)?,
+            "cubemap" => {
+                sky.cubemap = match &x {
+                    Value::Nil | Value::Boolean(false) => None,
+                    Value::String(path) => {
+                        Some(w.assets.load_cubemap(&path.to_string_lossy()).map_err(|e| rt(format!("{what}: {e}")))?)
+                    }
+                    _ => return Err(rt(format!("{what}: expected an image path (a 6:1 strip of +X -X +Y -Y +Z -Z faces)"))),
+                }
+            }
+            "blend" => {
+                let b = to_num(&x, &what)?;
+                sky.blend = if b.is_nan() { 1.0 } else { b.clamp(0.0, 1.0) };
+            }
+            "lighting" => sky.lighting = to_num(&x, &what)?.max(0.0),
+            _ => return Err(rt(format!("sky: unknown option '{k}' (allowed: {KEYS})"))),
+        }
+    }
+    Ok(Some(sky))
 }

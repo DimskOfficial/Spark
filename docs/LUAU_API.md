@@ -10,12 +10,27 @@ spark new path/to/game        # creates a new game in the recommended layout (se
 spark docs path/to/game       # (re)writes this reference into the game: docs/SPARK_API.md (+ AGENTS.md if missing)
 spark path/to/game            # runs path/to/game/main.luau in a window, hot-reloads on save
 spark game --headless --frames 120 --screenshot shot.png --dump-scene   # no window: check result as PNG + text
-spark update [0.2.0]          # installs the latest (or given) Spark release over this spark.exe
+spark check path/to/game      # finds script errors without a window / GPU (see "Type checking"; --json for tools)
+spark update [0.2.0]          # installs the latest (or given) Spark release over this spark executable
 spark --version
 ```
 
 Flags: `--headless`, `--frames N`, `--screenshot PATH`, `--dump-scene`, `--size WxH`, `--fixed-dt S`,
-`--no-vsync`, `--splash` / `--no-splash`, `--fullscreen`, `--windowed`, `--help`.
+`--no-vsync`, `--max-fps N`, `--splash` / `--no-splash`, `--fullscreen`, `--windowed`, `--help`.
+Headless testing: `--dump-scene-json PATH|-` (scene as JSON), `--screenshot-every N` (`shot-00060.png`, ...),
+`--timeout S` (fail when the run takes longer), `--input FILE` (scripted input, one event per line):
+
+```
+# frame  event
+10 key down space
+14 key up space
+20 mouse 640 360
+21 mouse_button down left
+40 wheel 1
+50 text hello
+```
+
+A script callback that runs longer than 5 s (e.g. `while true do end`) is stopped with an error instead of freezing the game.
 In a window F12 saves a screenshot to `screenshots/`, F11 or Alt+Enter toggles fullscreen.
 
 ### game.toml (optional, next to main.luau)
@@ -149,7 +164,9 @@ see "2D drawing"; the name `draw` is reserved for the drawing table).
 ### Frame order (always exactly this)
 
 1. input events: `key_pressed`, `key_released`, `mouse_pressed`, `mouse_released`, `wheel`
-2. `fixed_update(dt)` 0..N times (N depends on frame time; max 8)
+2. `fixed_update(dt)` 0..N times (N depends on frame time; max 8). `input.pressed/released` inside
+   `fixed_update` report every press exactly once (the first step after it), even at 144 Hz where many
+   frames run no fixed step. Physics bodies are drawn interpolated between steps: smooth on any refresh rate.
 3. `update(dt)`
 4. timers and tasks that are due (`after`, `every`, `wait`, `tween`, ...)
 5. events sent with `emit_later`
@@ -260,6 +277,15 @@ Primitives are centered at the origin (a cube of size 1 spans -0.5..0.5). Same p
 | `Material.texture(tex_or_path, tint="white")` | |
 | `Material.checker(a, b, repeats=1)` | 2x2 checker repeated `repeats` times across the surface |
 | `mat:tiling(x, y=x)`, `mat:with_color(c)`, `mat:with_unlit(true)` | return a modified copy |
+| `mat:with_blend("alpha")` | `"auto"` (default: alpha when color alpha < 1), `"opaque"`, `"alpha"` (glass, water, fades), `"additive"` (fire, glow) |
+| `mat:with_double_sided(true)`, `mat:with_cast_shadow(false)` | draw back faces (leaves, flags); no sun shadow |
+| `mat.blend`, `mat.double_sided`, `mat.cast_shadow` | read; objects also have `obj.blend`, `obj.double_sided`, `obj.cast_shadow` (read/write, also `spawn` props) |
+| `Material.pbr(c="white", metallic=0, roughness=0.5)` | physically based (Cook-Torrance GGX): metals reflect the ambient light and have tinted highlights |
+| `mat:with_metallic(m)`, `mat:with_roughness(r)` | 0..1 (clamped); either one turns PBR shading on |
+| `mat:with_emissive(c)` | light the surface gives off by itself (screens, lava, lamps); works in every mode, pairs well with bloom |
+| `mat:with_normal_map(tex_or_path)` | tangent-space normal map (OpenGL convention, green = up); `nil` removes it; works with and without PBR |
+| `mat.pbr`, `mat.metallic`, `mat.roughness`, `mat.emissive`, `mat.normal_map` | read; objects have the same names (read/write, also `spawn` props); setting `obj.metallic` / `obj.roughness` turns PBR on |
+| `obj.lod = { {20, mid}, {60, low} }` | level of detail: from 20 m away draw `mid`, from 60 m `low` (also a `spawn` prop; `{}` = off) |
 | `Color.rgb(r,g,b)`, `Color.rgba(r,g,b,a)`, `Color.hex("#ff8800")`, `Color.lerp(a,b,t)` | |
 | `Color.RED`, `Color.SKY`, ... | uppercase names of the color list above |
 | `color.r .g .b .a`, `color:lerp(c, t)`, `color:with_alpha(a)` | |
@@ -308,9 +334,10 @@ spawn(Mesh.box(0.1, 0.1, 0.6), "gray", { parent = hero:find("hand.R") })   -- sw
 
 - Formats: `.glb` (recommended) and `.gltf` (+ .bin / images next to it). Export from Blender: File > Export > glTF 2.0,
   "+Y up", forward = -Z for Spark (models face -Z like every Spark object; `obj:look_at` turns -Z to the target).
-- Supported: meshes (triangles), node hierarchy, base color factor + base color texture, `KHR_materials_unlit`,
+- Supported: meshes (triangles), node hierarchy, base color factor + base color texture, normal map, emissive
+  factor, metallic / roughness factors (used once you set `pbr = true` on its objects), `KHR_materials_unlit`,
   skins (up to 4 bones per vertex, CPU skinning), animations of translation / rotation / scale (step, linear, cubic).
-  Not (yet): morph targets, PBR maps (normal / metal-rough are ignored), cameras / lights in the file.
+  Not (yet): morph targets, metal-rough / emissive / occlusion textures, cameras / lights in the file.
 - `Model.load(path)` -> Model (cached by path). `model.name`, `model.animations` (list of clip names), `model.size`
   (bind-pose size vector), `model:duration(name)`.
 - `spawn(model_or_path, material?, props?)` -> root Object (empty, named after the file); every glTF node becomes a
@@ -347,9 +374,18 @@ t:cancel()
 
 - `camera.position`, `camera.x/y/z`, `camera.rotation` (euler), `camera.fov` (degrees, default 60), `camera.near`, `camera.far`
 - `camera:look_at(vec_or_obj)`, `camera:translate(v)`, `camera:forward()`, `camera:right()`, `camera:up()`
+- `camera.ortho = 20` - orthographic camera showing 20 m vertically (strategy, 2.5D, editors); `nil` = perspective
+- `camera:world_to_screen(pos)` -> `x, y, depth` in window pixels (nil when behind the camera): health bars, markers
+- `camera:screen_to_ray(x?, y?)` -> `origin, direction` (default: mouse position): mouse picking with `raycast` / `pick`
 - Default camera: position (0, 3, 8) looking at the origin.
 - `sun(direction, color?, intensity?)` - direction the light travels, e.g. `vec3(-0.5, -1, -0.3)`
 - `ambient(color)`, `background(color)`, `fog(color, near=10, far=60)`, `fog(nil)` to disable
+- `sky({ top = "sky", bottom = "#40382f", cubemap = "sky.png", blend = 1, lighting = 0 })` - sky behind everything
+  instead of the flat background; every key is optional, `sky(true)` = default blue sky, `sky(nil)` to remove.
+  `top` / `bottom` = gradient colors straight up / down; `cubemap` = image path of a 6:1 horizontal strip of square
+  faces in +X, -X, +Y, -Y, +Z, -Z order (cached by path), drawn over the gradient with `blend` (0..1);
+  `lighting` = image-based lighting strength: 0 keeps `ambient()`, above 0 the sky lights objects from every
+  direction (blue from above, ground color from below) and PBR metals reflect it (rougher = blurrier)
 - Point / spot lights (up to 32 nearest visible lights per frame; any object can carry one):
   - `light({ type = "point", color = "#ffd9a0", intensity = 1.5, range = 8, position = vec3(0, 3, 0) })` -> Object (invisible, only light)
   - `light({ type = "spot", angle = 30, softness = 0.3, ... })` - cone along the object's forward (-Z); aim with `rotation` or `obj:look_at(...)`
@@ -359,8 +395,8 @@ t:cancel()
 
 ## Render settings and shaders
 
-Spark has no built-in looks or effects: the default is plain lit rendering, everything else is your own WGSL.
-Full shader reference with examples: [SHADERS.md](SHADERS.md).
+The default is plain lit rendering. Built-in post effects (below) are all off by default; anything else is your own
+WGSL. Full shader reference with examples: [SHADERS.md](SHADERS.md).
 
 ```lua
 graphics.height = 240                -- render the 3D scene 240 px tall (width keeps the aspect), nil = native
@@ -378,6 +414,9 @@ graphics.post = { vhs }                            -- chain of full-screen passe
 ```
 
 - `graphics.height` (nil or pixels), `graphics.scale` (0.05..2, multiplies the internal resolution), `graphics.upscale`, `graphics.filter`
+- `graphics.msaa` = 1 / 2 / 4 (default) / 8 or true/false - anti-aliasing of the 3D scene (falls back to what the GPU supports)
+- `graphics.shadows` (default true), `graphics.shadow_distance` (meters around the camera, default 40),
+  `graphics.shadow_size` (shadow map pixels, default 2048) - sun shadows; `obj.cast_shadow = false` per object
 - `graphics.scene_width`, `graphics.scene_height` -> current size of the 3D image in pixels (read-only)
 - `graphics.shader` = surface Shader or nil (default lit shader)
 - `graphics.post` = Shader, list of Shaders / `{ shader = s, size = "screen" | "scene" }`, or nil. `size = "scene"` runs the pass at
@@ -390,6 +429,70 @@ graphics.post = { vhs }                            -- chain of full-screen passe
 - `shader.name`, `shader.kind` (`"surface"` | `"post"`), `shader.params` -> list of param names
 - Per material / object: `mat:with_shader(s)`, `mat:with_data(a, b, c, d)`; `obj.shader`, `obj.data` (read/write);
   spawn props `shader = s`, `data = {a, b, c, d}`. `data` arrives in WGSL as `object.data` (per-object values, e.g. a hit flash).
+
+### Built-in post effects
+
+Each effect is `nil` / `false` (off, default), `true` (default settings) or a table: missing keys keep their defaults,
+unknown keys and wrong types are errors. Reading an effect gives its current settings table (or `nil`).
+They run before your `graphics.post` passes, in this fixed order:
+SSAO -> motion blur -> depth of field -> bloom -> color grading -> tonemap -> FXAA -> chromatic aberration -> film grain -> vignette.
+
+```lua
+graphics.tonemap = "aces"                          -- "off" (default) | "aces" | "reinhard" | "hejl"
+graphics.bloom = { strength = 0.6 }                -- glow around bright pixels
+graphics.vignette = true                           -- defaults
+graphics.color_grading = { saturation = 1.2, gain = vec3(1, 0.95, 0.9) }
+graphics.fxaa = true
+graphics.bloom = nil                               -- off again
+```
+
+| effect | settings (defaults) |
+|---|---|
+| `tonemap` | `"off"` / `"aces"` / `"reinhard"` / `"hejl"` - maps bright (HDR) colors into the screen range |
+| `bloom` | `threshold` 0.8 (brightness where glow starts), `knee` 0.2, `strength` 0.4, `radius` 8 (pixels) |
+| `ssao` | `radius` 0.5 (meters), `samples` 16 (1-64), `strength` 1, `bias` 0.05 (meters) |
+| `motion_blur` | `strength` 1 (fraction of the frame the shutter is open), `samples` 8 (1-32); camera motion only |
+| `dof` | `focus` 10 (meters), `aperture` 2, `focal_range` 3 (meters in focus around `focus`), `samples` 16 |
+| `color_grading` | `exposure` 1, `contrast` 1, `saturation` 1, `temperature` 0 (-1 warm .. 1 cool), `tint` 0 (-1 green .. 1 magenta), `lift` vec3(0) / `gamma` vec3(1) / `gain` vec3(1) (per channel, vec3 or `{r, g, b}`) |
+| `fxaa` | `true` / `false` - smooths edges MSAA misses (shader / alpha edges) |
+| `chromatic_aberration` | `amount` 2 (pixels at the screen edge), `radial` true (false = horizontal split) |
+| `film_grain` | `strength` 0.05, `size` 2 (pixels) |
+| `vignette` | `strength` 0.5, `inner` 0.3, `outer` 0.85 (0 = center, 1 = screen edge), `color` black |
+
+The 3D scene is rendered in HDR (16-bit float) where the GPU supports it, so lights brighter than 1 survive until
+`tonemap` / `bloom`. With `tonemap = "off"` such values are clipped, as before.
+
+### Built-in post effects
+
+Each effect is `nil` / `false` (off, default), `true` (default settings) or a table: missing keys keep their defaults,
+unknown keys and wrong types are errors. Reading an effect gives its current settings table (or `nil`).
+They run before your `graphics.post` passes, in this fixed order:
+SSAO -> motion blur -> depth of field -> bloom -> color grading -> tonemap -> FXAA -> chromatic aberration -> film grain -> vignette.
+
+```lua
+graphics.tonemap = "aces"                          -- "off" (default) | "aces" | "reinhard" | "hejl"
+graphics.bloom = { strength = 0.6 }                -- glow around bright pixels
+graphics.vignette = true                           -- defaults
+graphics.color_grading = { saturation = 1.2, gain = vec3(1, 0.95, 0.9) }
+graphics.fxaa = true
+graphics.bloom = nil                               -- off again
+```
+
+| effect | settings (defaults) |
+|---|---|
+| `tonemap` | `"off"` / `"aces"` / `"reinhard"` / `"hejl"` - maps bright (HDR) colors into the screen range |
+| `bloom` | `threshold` 0.8 (brightness where glow starts), `knee` 0.2, `strength` 0.4, `radius` 8 (pixels) |
+| `ssao` | `radius` 0.5 (meters), `samples` 16 (1-64), `strength` 1, `bias` 0.05 (meters) |
+| `motion_blur` | `strength` 1 (fraction of the frame the shutter is open), `samples` 8 (1-32); camera motion only |
+| `dof` | `focus` 10 (meters), `aperture` 2, `focal_range` 3 (meters in focus around `focus`), `samples` 16 |
+| `color_grading` | `exposure` 1, `contrast` 1, `saturation` 1, `temperature` 0 (-1 warm .. 1 cool), `tint` 0 (-1 green .. 1 magenta), `lift` vec3(0) / `gamma` vec3(1) / `gain` vec3(1) (per channel, vec3 or `{r, g, b}`) |
+| `fxaa` | `true` / `false` - smooths edges MSAA misses (shader / alpha edges) |
+| `chromatic_aberration` | `amount` 2 (pixels at the screen edge), `radial` true (false = horizontal split) |
+| `film_grain` | `strength` 0.05, `size` 2 (pixels) |
+| `vignette` | `strength` 0.5, `inner` 0.3, `outer` 0.85 (0 = center, 1 = screen edge), `color` black |
+
+The 3D scene is rendered in HDR (16-bit float) where the GPU supports it, so lights brighter than 1 survive until
+`tonemap` / `bloom`. With `tonemap = "off"` such values are clipped, as before.
 
 ## Physics
 
@@ -492,11 +595,62 @@ end
 
 Full 2D game: `examples/starfall/main.luau`.
 
+## UI widgets (ui)
+
+Immediate-mode widgets on the UI layer, in the same virtual pixels as `draw` (top-left origin). Call them every
+frame from `render()` (or `update()`); they draw themselves and return the result right away. Interactive widgets take
+an **id** first: any string or integer that stays the same every frame (a click is a press and a release in
+different frames).
+
+```lua
+local volume, music = 0.5, true
+function render()
+    ui.panel(10, 10, 240, 150)
+    if ui.button("play", 20, 20, 220, 36, "Play") then start_game() end
+    volume = ui.slider("volume", 20, 70, 220, 16, volume, 0, 1)
+    music = ui.checkbox("music", 20, 100, 20, music)
+    ui.label(50, 102, "Music")
+    ui.progress(20, 135, 220, 10, hp / max_hp, "#e04040")
+end
+function update(dt)
+    if input.mouse_pressed("left") and not ui.hovered() then shoot() end   -- clicks on the UI don't shoot
+end
+```
+
+- `ui.button(id, x, y, w, h, text)` -> true on the frame it is clicked (pressed and released over it)
+- `ui.slider(id, x, y, w, h, value, min = 0, max = 1)` -> the value (changed while dragged)
+- `ui.checkbox(id, x, y, size, checked)` -> the state (flipped when clicked)
+- `ui.panel(x, y, w, h, color?, border_color?)` -> true when the mouse is over it
+- `ui.label(x, y, text, size = 16, color = white)` - text, top-left at x, y
+- `ui.image(x, y, w, h, texture)` - Texture or image path, stretched over the rect
+- `ui.progress(x, y, w, h, t, color?)` - bar filled to t (0..1)
+- `ui.hovered()` -> true when the mouse is over UI drawn this or the previous frame
+- Widgets never change `draw.layer` or the draw transform. Only the left mouse button interacts.
+
 ## Input and time
 
 - `input.down(key)`, `input.pressed(key)` (this frame), `input.released(key)`
-- keys: `"a"`..`"z"`, `"0"`..`"9"`, `space enter escape tab backspace left right up down shift ctrl alt lshift rshift lctrl rctrl lalt ralt f1..f12` (`esc`, `return` also work)
-- `input.mouse_down(btn="left")`, `input.mouse_pressed(btn)`, `input.mouse_released(btn)`; buttons `left right middle`
+- `input.repeated(key)` - went down **or auto-repeated** this frame (key held, OS repeat rate): menus, text fields, held Backspace
+- `input.text()` -> string typed this frame (keyboard layout and IME aware: `"A"` with shift, `"ё"`, `"日本"`; no control
+  characters - check `"enter"` / `"backspace"` with `input.pressed` / `input.repeated`). `""` when nothing was typed.
+  ```lua
+  name ..= input.text()
+  if input.repeated("backspace") and #name > 0 then name = string.sub(name, 1, utf8.offset(name, -1) - 1) end
+  ```
+- keys (physical positions, US layout names; work the same on every OS):
+  - letters / digits: `"a"`..`"z"`, `"0"`..`"9"`
+  - `space enter escape tab backspace left right up down`
+  - modifiers: `shift ctrl alt super` (either side) or `lshift rshift lctrl rctrl lalt ralt lsuper rsuper`
+    (`super` = Windows key / Cmd on macOS; aliases `meta cmd win`)
+  - punctuation: `minus equal bracketleft bracketright backslash semicolon quote comma period slash backquote`
+    (or the character itself: `"-" "=" "[" "]" "\\" ";" "'" "," "." "/" "`"`)
+  - `insert delete home end pageup pagedown capslock numlock scrolllock printscreen pause menu`
+    (aliases `ins del pgup pgdn`)
+  - numpad: `numpad0`..`numpad9`, `numpad_add numpad_subtract numpad_multiply numpad_divide numpad_decimal`
+    (numpad Enter is `enter`)
+  - `f1`..`f24`; `esc`, `return` also work. An unknown name is an error that lists every key.
+- `input.mouse_down(btn="left")`, `input.mouse_pressed(btn)`, `input.mouse_released(btn)`;
+  buttons `left right middle back forward` (side buttons 4 / 5; aliases `mouse4 mouse5`)
 - `input.mouse()` -> x, y in pixels; `input.mouse_delta()` -> dx, dy; `input.wheel()` -> number
 - `input.lock_mouse(on=true)` - hide and capture the cursor for FPS mouse look (`mouse_delta` = raw motion); released automatically when the window loses focus, re-locked on focus. `input.mouse_locked()` -> bool. Typical: lock on click, unlock on Escape.
 - Gamepads (XInput / DirectInput / SDL mappings, hot-plug). `pad` = 1-based pad number; omit it to accept any pad.
@@ -510,10 +664,46 @@ Full 2D game: `examples/starfall/main.luau`.
 - `time.dt`, `time.elapsed` (seconds), `time.frame`, `time.fps`, `time.unscaled_dt`, `time.unscaled_elapsed`
 - `time.scale` (read/write: 1 normal, 0.5 slow motion, 0 pause), `time.fixed_dt` (read/write, default 1/60)
 
+## Type checking
+
+Every game gets `docs/spark.d.luau`: type definitions of this whole API for [luau-lsp](https://github.com/JohnnyMorganz/luau-lsp)
+(written by `spark new` / `spark docs`, matching the engine version). With it the editor completes `input.`, `draw.`,
+object fields and key names, and underlines wrong names and arguments while you type.
+
+- VS Code: install the "Luau Language Server" extension. `spark new` / `spark docs` also write (only if missing)
+  `.vscode/settings.json` (`"luau-lsp.types.definitionFiles": { "@spark": "docs/spark.d.luau" }`, standard platform,
+  requires relative to the file) and `.luaurc` (`nonstrict` mode, alias `@game` = the game folder).
+  Other editors: pass the same definitions file to luau-lsp (`luau-lsp analyze --definitions=@spark=docs/spark.d.luau main.luau src/*.luau`).
+- Types: `Object`, `Color`, `Mesh`, `Texture`, `Material`, `Model`, `Shader`, `Font`, `Timer`, `Task`, `Listener`,
+  `Tween`, `Sound`, `Bus`, `Camera`, `Key`, `MouseButton`, `PadButton`, `ColorLike`, `SpawnProps`, `BodySpec`, ...
+  (`local enemies: { Object } = {}`). Key names are a literal type: for a key held in a `string` variable use `key :: Key`.
+- Add `--!strict` at the top of a file for full type checking of that file.
+
+`spark check` finds errors at runtime, without a window or GPU (CI, AI agents):
+
+```
+spark check path/to/game [--frames N] [--json]
+```
+
+1. compiles **every** `.luau` file of the game (syntax errors also in modules nothing requires yet);
+2. runs `main.luau` headless for N frames (default 60): `start()`, `update`, `fixed_update`, `render`, timers, tasks,
+   physics and every required module. No audio, no rendering.
+
+Prints `file:line: message` per error and exits with code 1 (0 = ok). `--json` prints one line:
+
+```json
+{"ok":false,"errors":[{"file":"src/player.luau","line":12,"message":"attempt to index nil with 'x'"}],"frames":4,"objects":17,"files":5}
+```
+
+`line` is `null` when the error has no location (e.g. a `game.toml` mistake). Input is empty during the check:
+code behind `input.pressed(...)` only runs in a real session (`spark . --headless` with a script that drives it, or a window).
+
 ## Saving
 
-Small persistent key/value storage, saved instantly to `%APPDATA%/SparkGames/<title>/save.json`
-(Linux / macOS: `~/.local/share/SparkGames/<title>/`). Headless runs keep it in memory only.
+Small persistent key/value storage in `%APPDATA%/SparkGames/<title>/save.json` (Windows),
+`~/Library/Application Support/SparkGames/<title>/` (macOS), `~/.local/share/SparkGames/<title>/` (Linux).
+Headless runs keep it in memory only. Changes are written once at the end of the frame (atomically, so a crash
+never leaves a half-written file) and on exit; `save.flush()` writes immediately. A damaged file is kept as `save.json.bak`.
 
 - `save.set(key, value)` - numbers, strings, booleans, vectors and (nested) tables of them; `nil` deletes
 - `save.get(key, default)` -> value or `default`; `save.has(key)`, `save.delete(key)`, `save.clear()`, `save.keys()`, `save.path()`
@@ -526,6 +716,20 @@ save.set("settings", { volume = 0.8, fov = 75 })
 ## Window
 
 - `window.fullscreen` (read/write, borderless), `window.title` (read/write; nil = game title), `window.width`, `window.height` (pixels, read-only)
+
+## Debug overlay
+
+F1 shows an overlay with FPS, frame time (min / max / average over 120 frames), GPU name, object count,
+draw calls and triangles of the last frame. The same `debug` table still holds the standard Luau
+library (`debug.traceback()`, `debug.info(...)`).
+
+- `debug.enabled` (read/write), `debug.toggle()` -> new state
+- `debug.hotkey = false`: F1 no longer toggles the overlay (games that use F1 themselves)
+- `debug.show_fps`, `debug.show_gpu`, `debug.show_scene`, `debug.show_physics` (read/write sections)
+- `debug.fps`, `debug.frame_time` (ms, read-only), `debug.avg_frame_ms()`
+- `debug.add_line(text, color="white")`: extra line for this frame only (call it every frame); `debug.clear_lines()`
+
+Unknown fields and writes to read-only ones are errors.
 
 ## Misc
 
