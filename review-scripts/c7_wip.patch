@@ -1,0 +1,993 @@
+diff --git a/README.md b/README.md
+index 8f7f372..0e4cf4f 100644
+--- a/README.md
++++ b/README.md
+@@ -55,7 +55,7 @@ Spark does not try to compete with Unity, Unreal or Godot. It has a different jo
+ 
+ | Module | What you get |
+ |---|---|
+-| **Render** | wgpu (Vulkan / DirectX 12 / Metal / OpenGL fallback). 3D meshes and primitives, glTF 2.0 models with skins and animations, sun / point / spot lights, optional PBR materials (metallic / roughness, normal maps, emissive), mesh LOD, fog, HDR scene, built-in post effects (bloom, tonemapping, SSAO, depth of field, motion blur, color grading, FXAA, vignette, film grain, chromatic aberration; all off by default), your own WGSL surface and full-screen post shaders with hot reload ([docs/SHADERS.md](docs/SHADERS.md)), low internal resolution for weak PCs |
++| **Render** | wgpu (Vulkan / DirectX 12 / Metal / OpenGL fallback). 3D meshes and primitives, glTF 2.0 models with skins and animations, sun / point / spot lights, optional PBR materials (metallic / roughness, normal maps, emissive), mesh LOD, gradient or cubemap sky with image-based lighting, fog, HDR scene, built-in post effects (bloom, tonemapping, SSAO, depth of field, motion blur, color grading, FXAA, vignette, film grain, chromatic aberration; all off by default), your own WGSL surface and full-screen post shaders with hot reload ([docs/SHADERS.md](docs/SHADERS.md)), low internal resolution for weak PCs |
+ | **2D** | immediate-mode drawing: sprites and sprite sheets, text with any TTF/OTF font, shapes, transforms, UI and in-scene layers, immediate-mode UI widgets (buttons, sliders, checkboxes, panels, progress bars) |
+ | **Script** | Luau runtime with hot reload, modules (`require`), timers, coroutine tasks with `wait`, tweens |
+ | **Input** | full keyboard (punctuation, numpad, F1-F24), text input with IME, key repeat, mouse with side buttons and FPS mouse lock, gamepads with hot-plug |
+diff --git a/README.ru.md b/README.ru.md
+index 71fc474..4262b91 100644
+--- a/README.ru.md
++++ b/README.ru.md
+@@ -57,7 +57,7 @@ SPARK не пытается тягаться с Unity, Unreal Engine или Godo
+ 
+ | Модуль | Что умеет |
+ |---|---|
+-| **Render** | wgpu (Vulkan / DirectX 12 / Metal / запасной OpenGL). 3D-меши и примитивы, модели glTF 2.0 со скелетом и анимациями, солнце / точечные и прожекторные источники света, PBR-материалы по желанию (metallic / roughness, карты нормалей, свечение), LOD мешей, туман, HDR-сцена, встроенные пост-эффекты (bloom, тонмаппинг, SSAO, глубина резкости, motion blur, цветокоррекция, FXAA, виньетка, зерно, хроматическая аберрация; по умолчанию выключены), свои WGSL-шейдеры поверхностей и пост-процессинга с горячей перезагрузкой ([docs/SHADERS.md](docs/SHADERS.md)), низкое внутреннее разрешение для слабых ПК |
++| **Render** | wgpu (Vulkan / DirectX 12 / Metal / запасной OpenGL). 3D-меши и примитивы, модели glTF 2.0 со скелетом и анимациями, солнце / точечные и прожекторные источники света, PBR-материалы по желанию (metallic / roughness, карты нормалей, свечение), LOD мешей, небо (градиент или кубмапа) с освещением от неба (IBL), туман, HDR-сцена, встроенные пост-эффекты (bloom, тонмаппинг, SSAO, глубина резкости, motion blur, цветокоррекция, FXAA, виньетка, зерно, хроматическая аберрация; по умолчанию выключены), свои WGSL-шейдеры поверхностей и пост-процессинга с горячей перезагрузкой ([docs/SHADERS.md](docs/SHADERS.md)), низкое внутреннее разрешение для слабых ПК |
+ | **2D** | immediate-mode отрисовка: спрайты и спрайт-листы, текст любым TTF/OTF-шрифтом, фигуры, трансформации, слои UI и сцены, immediate-mode UI-виджеты (кнопки, слайдеры, чекбоксы, панели, прогресс-бары) |
+ | **Script** | рантайм Luau с горячей перезагрузкой, модули (`require`), таймеры, задачи-корутины с `wait`, твины |
+ | **Input** | полная клавиатура (пунктуация, numpad, F1-F24), ввод текста с IME, автоповтор, мышь с боковыми кнопками и захватом для FPS, геймпады с горячим подключением |
+diff --git a/crates/spark-core/src/assets.rs b/crates/spark-core/src/assets.rs
+index d930d91..76b3166 100644
+--- a/crates/spark-core/src/assets.rs
++++ b/crates/spark-core/src/assets.rs
+@@ -14,6 +14,13 @@ pub struct MeshId(pub u32);
+ #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+ pub struct TextureId(pub u32);
+ 
++/// Handle to a cubemap (six square faces) stored in [`Assets`].
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
++pub struct CubemapId(pub u32);
++
++/// Cube faces in GPU layer order.
++pub const CUBE_FACES: [&str; 6] = ["+X", "-X", "+Y", "-Y", "+Z", "-Z"];
++
+ /// RGBA8 image in sRGB space.
+ #[derive(Clone, Debug, PartialEq)]
+ pub struct ImageData {
+@@ -87,6 +94,8 @@ pub struct Assets {
+     model_paths: HashMap<PathBuf, ModelId>,
+     textures: Vec<ImageData>,
+     texture_paths: HashMap<PathBuf, TextureId>,
++    cubemaps: Vec<[ImageData; 6]>,
++    cubemap_paths: HashMap<PathBuf, CubemapId>,
+     shaders: Vec<ShaderData>,
+     shader_paths: HashMap<PathBuf, ShaderId>,
+     generation: u64,
+@@ -180,6 +189,43 @@ impl Assets {
+         self.textures.len()
+     }
+ 
++    /// Adds a cubemap from six square faces of the same size, in [`CUBE_FACES`] order
++    /// (+X, -X, +Y, -Y, +Z, -Z; +Y is up, -Z is forward like the Spark camera).
++    pub fn add_cubemap(&mut self, faces: [ImageData; 6]) -> Result<CubemapId, String> {
++        let size = faces[0].width;
++        if size == 0 {
++            return Err("cubemap faces are empty".into());
++        }
++        for (f, name) in faces.iter().zip(CUBE_FACES) {
++            if f.width != size || f.height != size {
++                return Err(format!("cubemap face {name} is {}x{}; all faces must be {size}x{size}", f.width, f.height));
++            }
++        }
++        self.cubemaps.push(faces);
++        Ok(CubemapId(self.cubemaps.len() as u32 - 1))
++    }
++
++    /// Loads a cubemap once from a horizontal strip image (6 square faces side by side, in
++    /// +X, -X, +Y, -Y, +Z, -Z order, so the image is 6 times wider than tall).
++    pub fn load_cubemap(&mut self, path: &str) -> Result<CubemapId, String> {
++        let full = self.resolve(path);
++        if let Some(&id) = self.cubemap_paths.get(&full) {
++            return Ok(id);
++        }
++        let strip = ImageData::load(&full)?;
++        let id = self.add_cubemap(split_strip(&strip).map_err(|e| format!("{path}: {e}"))?)?;
++        self.cubemap_paths.insert(full, id);
++        Ok(id)
++    }
++
++    pub fn cubemap(&self, id: CubemapId) -> Option<&[ImageData; 6]> {
++        self.cubemaps.get(id.0 as usize)
++    }
++
++    pub fn cubemap_count(&self) -> usize {
++        self.cubemaps.len()
++    }
++
+     /// Compiles WGSL code (see [`crate::shader`]).
+     pub fn add_shader(&mut self, name: &str, code: &str) -> Result<ShaderId, String> {
+         self.shaders.push(ShaderData::compile(name, code)?);
+@@ -229,6 +275,8 @@ impl Assets {
+         self.model_paths.clear();
+         self.textures.clear();
+         self.texture_paths.clear();
++        self.cubemaps.clear();
++        self.cubemap_paths.clear();
+         self.shaders.clear();
+         self.shader_paths.clear();
+         self.generation += 1;
+@@ -239,3 +287,61 @@ impl Assets {
+         self.generation
+     }
+ }
++/// Cuts a 6:1 horizontal strip into its six square faces.
++fn split_strip(strip: &ImageData) -> Result<[ImageData; 6], String> {
++    let size = strip.height;
++    if size == 0 || strip.width != size * 6 {
++        return Err(format!(
++            "a cubemap strip must be 6 square faces side by side (width = 6 x height), got {}x{}",
++            strip.width, strip.height
++        ));
++    }
++    Ok(std::array::from_fn(|face| {
++        let mut pixels = Vec::with_capacity((size * size * 4) as usize);
++        for y in 0..size {
++            let start = ((y * strip.width + face as u32 * size) * 4) as usize;
++            pixels.extend_from_slice(&strip.pixels[start..start + (size * 4) as usize]);
++        }
++        ImageData::new(size, size, pixels)
++    }))
++}
++
++#[cfg(test)]
++mod cubemap_tests {
++    use super::*;
++
++    fn face(c: u8, size: u32) -> ImageData {
++        ImageData::new(size, size, [c, c, c, 255].repeat((size * size) as usize))
++    }
++
++    #[test]
++    fn strip_splits_into_faces_in_order() {
++        // 6 faces of 2x2, face i filled with value i * 10.
++        let (size, w) = (2u32, 12u32);
++        let mut pixels = Vec::new();
++        for _y in 0..size {
++            for x in 0..w {
++                let v = (x / size) as u8 * 10;
++                pixels.extend_from_slice(&[v, v, v, 255]);
++            }
++        }
++        let faces = split_strip(&ImageData::new(w, size, pixels)).unwrap();
++        for (i, f) in faces.iter().enumerate() {
++            assert_eq!(*f, face(i as u8 * 10, size), "face {}", CUBE_FACES[i]);
++        }
++        assert!(split_strip(&ImageData::new(4, 2, vec![0; 32])).is_err(), "not 6:1");
++    }
++
++    #[test]
++    fn cubemap_faces_must_match() {
++        let mut a = Assets::new();
++        let ok = a.add_cubemap(std::array::from_fn(|i| face(i as u8, 4))).unwrap();
++        assert_eq!(a.cubemap(ok).unwrap()[5], face(5, 4));
++        let mut bad: [ImageData; 6] = std::array::from_fn(|_| face(0, 4));
++        bad[3] = face(0, 2);
++        assert!(a.add_cubemap(bad).unwrap_err().contains("-Y"));
++        assert!(a.add_cubemap(std::array::from_fn(|_| face(0, 0))).is_err());
++        a.clear();
++        assert_eq!(a.cubemap_count(), 0);
++    }
++}
+diff --git a/crates/spark-core/src/lib.rs b/crates/spark-core/src/lib.rs
+index 733a099..f61d942 100644
+--- a/crates/spark-core/src/lib.rs
++++ b/crates/spark-core/src/lib.rs
+@@ -36,7 +36,7 @@ pub mod world;
+ pub use glam::{self, EulerRot, Mat3, Mat4, Quat, Vec2, Vec3, Vec4, vec2, vec3, vec4};
+ 
+ pub use animation::{AnimParams, Animator};
+-pub use assets::{Assets, ImageData, MeshId, TextureId};
++pub use assets::{Assets, CUBE_FACES, CubemapId, ImageData, MeshId, TextureId};
+ pub use audio::{Audio, AudioBackend, AudioCommand, BusId, PlayParams, SoundId, SoundSource};
+ pub use branding::{BadgeParams, BadgeState, Branding, SPARK_URL, Splash};
+ pub use camera::Camera;
+@@ -53,7 +53,7 @@ pub use model::{ModelData, ModelId};
+ pub use pick::PickHit;
+ pub use physics::{Body, BodyKind, CharacterMove, Collision, Physics, PhysicsBackend, RayHit, Shape};
+ pub use render::{PassSize, PostPass, RenderSettings, TextureFilter};
+-pub use scene::{Fog, Light, LightKind, Object, ObjectId, Scene, Sun};
++pub use scene::{Fog, Light, LightKind, Object, ObjectId, Scene, Sky, Sun};
+ pub use schedule::{Scheduler, TimerId};
+ pub use shader::{Param, ParamType, ShaderData, ShaderId, ShaderKind};
+ pub use text::{FontId, Fonts};
+diff --git a/crates/spark-core/src/scene.rs b/crates/spark-core/src/scene.rs
+index f9ca022..a44af73 100644
+--- a/crates/spark-core/src/scene.rs
++++ b/crates/spark-core/src/scene.rs
+@@ -2,7 +2,7 @@ use std::fmt::Write as _;
+ 
+ use glam::{EulerRot, Mat4, Quat, Vec3};
+ 
+-use crate::assets::MeshId;
++use crate::assets::{CubemapId, MeshId};
+ use crate::camera::Camera;
+ use crate::color::Color;
+ use crate::material::Material;
+@@ -223,6 +223,48 @@ pub struct Fog {
+     pub far: f32,
+ }
+ 
++/// Sky drawn behind every object (instead of the flat `background` color). It can also light
++/// the scene (image-based lighting): see [`Sky::lighting`].
++#[derive(Clone, Copy, Debug, PartialEq)]
++pub struct Sky {
++    /// Color straight up; the sky fades to `bottom` straight down (the horizon is halfway).
++    pub top: Color,
++    /// Color straight down.
++    pub bottom: Color,
++    /// Optional cubemap (photo or painted sky), drawn over the gradient.
++    pub cubemap: Option<CubemapId>,
++    /// How much of the cubemap covers the gradient, 0..1.
++    pub blend: f32,
++    /// Image-based lighting strength. 0 = off (objects use the flat `ambient` color);
++    /// above 0 the sky replaces the ambient light (blue from above, ground color from below)
++    /// and PBR surfaces reflect it.
++    pub lighting: f32,
++}
++
++impl Sky {
++    /// Two-color gradient sky.
++    pub fn gradient(top: Color, bottom: Color) -> Self {
++        Self { top, bottom, cubemap: None, blend: 1.0, lighting: 0.0 }
++    }
++
++    /// Cubemap sky (see [`crate::Assets::load_cubemap`]).
++    pub fn cubemap(cubemap: CubemapId) -> Self {
++        Self { cubemap: Some(cubemap), ..Self::default() }
++    }
++
++    /// Sets the image-based lighting strength (0 = off).
++    pub fn with_lighting(mut self, lighting: f32) -> Self {
++        self.lighting = lighting.max(0.0);
++        self
++    }
++}
++
++impl Default for Sky {
++    fn default() -> Self {
++        Self::gradient(Color::rgb(0.38, 0.62, 0.92), Color::rgb(0.22, 0.2, 0.18))
++    }
++}
++
+ #[derive(Clone, Debug)]
+ struct Slot {
+     generation: u32,
+@@ -240,6 +282,8 @@ pub struct Scene {
+     pub ambient: Color,
+     pub background: Color,
+     pub fog: Option<Fog>,
++    /// Sky behind everything; `None` = clear to `background`.
++    pub sky: Option<Sky>,
+ }
+ 
+ impl Default for Scene {
+@@ -259,6 +303,7 @@ impl Scene {
+             ambient: Color::rgb(0.35, 0.38, 0.45),
+             background: Color::rgb(0.08, 0.09, 0.12),
+             fog: None,
++            sky: None,
+         }
+     }
+ 
+diff --git a/crates/spark-core/src/shader.rs b/crates/spark-core/src/shader.rs
+index cc4fdca..2621843 100644
+--- a/crates/spark-core/src/shader.rs
++++ b/crates/spark-core/src/shader.rs
+@@ -88,6 +88,9 @@ pub const MAX_PARAMS_SIZE: usize = 256;
+ const COMMON: &str = include_str!("shaders/common.wgsl");
+ const SURFACE: &str = include_str!("shaders/surface.wgsl");
+ const POST: &str = include_str!("shaders/post.wgsl");
++/// Sky bindings and helpers (`sky_color`, `ambient_light`): surface shaders and the skybox pass.
++const SKY: &str = include_str!("shaders/sky.wgsl");
++const SKYBOX: &str = include_str!("shaders/skybox.wgsl");
+ 
+ /// A compiled (validated) shader plus its parameter values.
+ #[derive(Clone, Debug)]
+@@ -186,6 +189,12 @@ fn defines_struct(code: &str, name: &str) -> bool {
+         || code.contains(&format!("struct {name}{{"))
+ }
+ 
++/// Full WGSL of the skybox pass (`sky_vs` / `sky_fs`). It shares `sky_color` with surface
++/// shaders, so the sky behind objects matches their reflections.
++pub fn skybox_source() -> String {
++    format!("{COMMON}{SKY}{SKYBOX}")
++}
++
+ /// Game code + engine prelude for `kind`.
+ pub fn compose(code: &str, kind: ShaderKind) -> String {
+     let mut s = String::with_capacity(code.len() + 8192);
+@@ -198,6 +207,7 @@ pub fn compose(code: &str, kind: ShaderKind) -> String {
+         ShaderKind::Surface => {
+             let vs = if defines_fn(code, "vertex") { "vertex" } else { "default_vertex" };
+             let fs = if defines_fn(code, "fragment") { "fragment" } else { "default_fragment" };
++            s.push_str(SKY);
+             s.push_str(&SURFACE.replace("SPARK_VERTEX", vs).replace("SPARK_FRAGMENT", fs));
+         }
+         ShaderKind::Post => s.push_str(POST),
+@@ -501,4 +511,15 @@ mod postfx_tests {
+         }
+         assert!(errors.is_empty(), "{}", errors.join("\n\n"));
+     }
++
++    #[test]
++    fn skybox_shader_is_valid() {
++        let source = skybox_source();
++        let module = naga::front::wgsl::parse_str(&source).map_err(|e| e.emit_to_string(&source)).unwrap();
++        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::default())
++            .validate(&module)
++            .map_err(|e| e.emit_to_string(&source))
++            .unwrap();
++        assert!(module.entry_points.iter().any(|e| e.name == "sky_vs") && module.entry_points.iter().any(|e| e.name == "sky_fs"));
++    }
+ }
+diff --git a/crates/spark-core/src/shaders/common.wgsl b/crates/spark-core/src/shaders/common.wgsl
+index 93d6b3a..e4a9b67 100644
+--- a/crates/spark-core/src/shaders/common.wgsl
++++ b/crates/spark-core/src/shaders/common.wgsl
+@@ -28,6 +28,9 @@ struct Frame {
+     shadow_view_proj: mat4x4<f32>, // world -> sun shadow map clip space
+     shadow: vec4<f32>,      // enabled (0 / 1), 1 / map size, normal offset (m), shadow distance (m)
+     prev_view_proj: mat4x4<f32>, // view_proj of the previous frame (camera motion blur, reprojection)
++    sky_top: vec4<f32>,     // rgb, linear
++    sky_bottom: vec4<f32>,  // rgb, linear
++    sky: vec4<f32>,         // enabled (0 / 1), cubemap blend (0 = no cubemap), lighting strength, cubemap mip count
+ };
+ 
+ @group(0) @binding(0) var<uniform> frame: Frame;
+diff --git a/crates/spark-core/src/shaders/sky.wgsl b/crates/spark-core/src/shaders/sky.wgsl
+new file mode 100644
+index 0000000..4a06d2f
+--- /dev/null
++++ b/crates/spark-core/src/shaders/sky.wgsl
+@@ -0,0 +1,35 @@
++// ─── Sky ───────────────────────────────────────────────────────
++
++// Sky cubemap (a 1x1 white cube when the scene has none) and its trilinear sampler.
++@group(0) @binding(3) var spark_sky_cube: texture_cube<f32>;
++@group(0) @binding(4) var spark_sky_sampler: sampler;
++
++// Sky color (linear) seen in world direction `dir`: the top / bottom gradient with the cubemap
++// blended over it. `blur` 0 = sharp, 1 = the blurriest cubemap mip (rough reflections, ambient).
++// Black when the scene has no sky.
++fn sky_color(dir: vec3<f32>, blur: f32) -> vec3<f32> {
++    let d = normalize(dir);
++    var c = mix(frame.sky_bottom.rgb, frame.sky_top.rgb, clamp(d.y * 0.5 + 0.5, 0.0, 1.0));
++    if (frame.sky.y > 0.0) {
++        let lod = clamp(blur, 0.0, 1.0) * max(frame.sky.w - 1.0, 0.0);
++        c = mix(c, textureSampleLevel(spark_sky_cube, spark_sky_sampler, d, lod).rgb, frame.sky.y);
++    }
++    return c * frame.sky.x;
++}
++
++// Ambient (indirect) light arriving at a surface with normal `n`: the sky when sky lighting is on,
++// otherwise the scene's flat ambient color.
++fn ambient_light(n: vec3<f32>) -> vec3<f32> {
++    if (frame.sky.z > 0.0) {
++        return sky_color(n, 1.0) * frame.sky.z;
++    }
++    return frame.ambient.rgb;
++}
++
++// Light reflected towards the camera by a mirror-like surface (`r` = reflection direction).
++fn ambient_reflection(r: vec3<f32>, roughness: f32) -> vec3<f32> {
++    if (frame.sky.z > 0.0) {
++        return sky_color(r, sqrt(clamp(roughness, 0.0, 1.0))) * frame.sky.z;
++    }
++    return frame.ambient.rgb;
++}
+diff --git a/crates/spark-core/src/shaders/skybox.wgsl b/crates/spark-core/src/shaders/skybox.wgsl
+new file mode 100644
+index 0000000..08085df
+--- /dev/null
++++ b/crates/spark-core/src/shaders/skybox.wgsl
+@@ -0,0 +1,27 @@
++
++// ─── Skybox pass ───────────────────────────────────────────────
++// Full-screen triangle drawn first in the scene pass (no depth write): every pixel not covered by
++// an object shows the sky in its view direction.
++
++struct SkyOut {
++    @builtin(position) clip: vec4<f32>,
++    @location(0) ndc: vec2<f32>,
++};
++
++@vertex
++fn sky_vs(@builtin(vertex_index) i: u32) -> SkyOut {
++    let uv = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
++    let ndc = uv * 2.0 - 1.0;
++    var o: SkyOut;
++    o.clip = vec4<f32>(ndc, 1.0, 1.0);
++    o.ndc = ndc;
++    return o;
++}
++
++@fragment
++fn sky_fs(o: SkyOut) -> @location(0) vec4<f32> {
++    let far = frame.inv_view_proj * vec4<f32>(o.ndc, 1.0, 1.0);
++    let near = frame.inv_view_proj * vec4<f32>(o.ndc, 0.0, 1.0);
++    let dir = far.xyz / far.w - near.xyz / near.w;
++    return vec4<f32>(sky_color(dir, 0.0), 1.0);
++}
+diff --git a/crates/spark-core/src/shaders/surface.wgsl b/crates/spark-core/src/shaders/surface.wgsl
+index 92616f3..6694ccf 100644
+--- a/crates/spark-core/src/shaders/surface.wgsl
++++ b/crates/spark-core/src/shaders/surface.wgsl
+@@ -84,7 +84,7 @@ fn sun_shadow(world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
+ fn lighting(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+     let n = normalize(normal);
+     let sun = max(dot(n, normalize(-frame.sun_dir.xyz)), 0.0);
+-    var light = frame.ambient.rgb;
++    var light = ambient_light(n);
+     if (sun > 0.0) {
+         light = light + frame.sun_color.rgb * sun * sun_shadow(world_pos, n);
+     }
+@@ -171,14 +171,15 @@ fn pbr_direct(n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, radiance: vec3<f32>, bas
+     return (diffuse + specular * PI) * radiance * n_dot_l;
+ }
+ 
+-// Ambient light on a PBR surface: diffuse plus a rough environment reflection of the ambient color
+-// (so metals are not black without lights).
++// Ambient light on a PBR surface: diffuse plus the environment reflection (the sky with sky
++// lighting on, else the ambient color), so metals are not black without lights.
+ fn pbr_ambient(n: vec3<f32>, v: vec3<f32>, base: vec3<f32>, metallic: f32, roughness: f32) -> vec3<f32> {
+     let n_dot_v = max(dot(n, v), 1e-4);
+     let f0 = mix(vec3<f32>(0.04), base, metallic);
+     let env = env_brdf_approx(roughness, n_dot_v);
+     let specular = f0 * env.x + env.y;
+-    return frame.ambient.rgb * ((1.0 - specular) * (1.0 - metallic) * base + specular);
++    let diffuse = ambient_light(n) * (1.0 - specular) * (1.0 - metallic) * base;
++    return diffuse + ambient_reflection(reflect(-v, n), roughness) * specular;
+ }
+ 
+ // Full PBR lighting of a surface point: ambient + sun (with shadows) + point / spot lights.
+diff --git a/crates/spark-render/src/lib.rs b/crates/spark-render/src/lib.rs
+index 060a2a0..aafb558 100644
+--- a/crates/spark-render/src/lib.rs
++++ b/crates/spark-render/src/lib.rs
+@@ -15,8 +15,8 @@ use std::sync::Arc;
+ use bytemuck::{Pod, Zeroable};
+ use spark_core::shader::{COPY_POST, MAX_PARAMS_SIZE};
+ use spark_core::{
+-    Aabb, Assets, Batch, Canvas, CanvasTexture, Color, ImageData, Layer, Mat4, MeshId, PassSize, ShaderData, ShaderKind,
+-    TextureFilter, TextureId, Vec3, Vec4, Vertex, Vertex2D, World,
++    Aabb, Assets, Batch, Canvas, CanvasTexture, Color, CubemapId, ImageData, Layer, Mat4, MeshId, PassSize, ShaderData,
++    ShaderKind, TextureFilter, TextureId, Vec3, Vec4, Vertex, Vertex2D, World,
+ };
+ use spark_core::material::BlendMode;
+ use wgpu::util::DeviceExt;
+@@ -69,6 +69,10 @@ struct FrameUniform {
+     /// enabled, 1 / map size, normal offset, shadow distance
+     shadow: [f32; 4],
+     prev_view_proj: [[f32; 4]; 4],
++    sky_top: [f32; 4],
++    sky_bottom: [f32; 4],
++    /// enabled, cubemap blend, lighting strength, cubemap mip count
++    sky: [f32; 4],
+ }
+ 
+ const MAX_LIGHTS: usize = spark_core::Light::MAX_VISIBLE;
+@@ -146,6 +150,12 @@ struct GpuMesh {
+     version: u64,
+ }
+ 
++/// Sky cubemap on the GPU (full mip chain: blurrier mips light rough surfaces).
++struct GpuCube {
++    view: wgpu::TextureView,
++    mips: u32,
++}
++
+ struct GpuTexture {
+     texture: wgpu::Texture,
+     view: wgpu::TextureView,
+@@ -273,6 +283,17 @@ pub struct Renderer {
+     /// 1x1 map bound when shadows are off.
+     shadow_dummy: ShadowMap,
+     shadow: Option<ShadowMap>,
++    /// Trilinear sampler of sky cubemaps.
++    sky_sampler: wgpu::Sampler,
++    /// 1x1 white cube bound when the sky has no cubemap.
++    sky_dummy: GpuCube,
++    cubemaps: Vec<GpuCube>,
++    /// What `frame_bind_group` was built with: shadow map size (None = dummy), sky cubemap.
++    frame_group_key: (Option<u32>, Option<usize>),
++    sky_pipeline_layout: wgpu::PipelineLayout,
++    sky_shader: wgpu::ShaderModule,
++    /// Skybox pipelines per MSAA sample count.
++    sky_pipelines: HashMap<u32, wgpu::RenderPipeline>,
+     shadow_buffer: wgpu::Buffer,
+     shadow_bind_group: wgpu::BindGroup,
+     shadow_pipeline: wgpu::RenderPipeline,
+@@ -674,6 +695,17 @@ impl Renderer {
+                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                     count: None,
+                 },
++                wgpu::BindGroupLayoutEntry {
++                    binding: 3,
++                    visibility: fs,
++                    ty: wgpu::BindingType::Texture {
++                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
++                        view_dimension: wgpu::TextureViewDimension::Cube,
++                        multisampled: false,
++                    },
++                    count: None,
++                },
++                sampler_entry(4, fs),
+             ],
+         );
+         let object_layout = bind_group_layout(
+@@ -727,7 +759,25 @@ impl Renderer {
+             ..Default::default()
+         });
+         let shadow_dummy = shadow_map(&device, 1);
+-        let frame_bind_group = frame_bind_group(&device, &frame_layout, &frame_buffer, &shadow_dummy.view, &shadow_sampler);
++        let sky_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
++            label: Some("spark sky sampler"),
++            mag_filter: wgpu::FilterMode::Linear,
++            min_filter: wgpu::FilterMode::Linear,
++            mipmap_filter: wgpu::MipmapFilterMode::Linear,
++            ..Default::default()
++        });
++        let sky_dummy = upload_cube(&device, &queue, &std::array::from_fn(|_| ImageData::solid(Color::WHITE)));
++        let frame_bind_group =
++            frame_bind_group(&device, &frame_layout, &frame_buffer, &shadow_dummy.view, &shadow_sampler, &sky_dummy.view, &sky_sampler);
++        let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
++            label: Some("spark sky"),
++            bind_group_layouts: &[Some(&frame_layout)],
++            immediate_size: 0,
++        });
++        let sky_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
++            label: Some("spark sky"),
++            source: wgpu::ShaderSource::Wgsl(spark_core::shader::skybox_source().into()),
++        });
+ 
+         // Per-object uniforms, read in 64-object windows (dynamic offsets) by instanced draws.
+         let object_align = device.limits().min_uniform_buffer_offset_alignment as u64;
+@@ -911,6 +961,13 @@ impl Renderer {
+             shadow_sampler,
+             shadow_dummy,
+             shadow: None,
++            sky_sampler,
++            sky_dummy,
++            cubemaps: Vec::new(),
++            frame_group_key: (None, None),
++            sky_pipeline_layout,
++            sky_shader,
++            sky_pipelines: HashMap::new(),
+             shadow_buffer,
+             shadow_bind_group,
+             shadow_pipeline,
+@@ -988,6 +1045,7 @@ impl Renderer {
+         if assets.generation() != self.assets_generation {
+             self.meshes.clear();
+             self.textures.clear();
++            self.cubemaps.clear();
+             self.normal_mapped_groups.clear();
+             self.shaders.clear();
+             self.assets_generation = assets.generation();
+@@ -1040,9 +1098,55 @@ impl Renderer {
+             };
+             self.textures.push(gpu);
+         }
++        while self.cubemaps.len() < assets.cubemap_count() {
++            // loop condition guarantees cubemap id < assets.cubemap_count().
++            let faces = assets.cubemap(CubemapId(self.cubemaps.len() as u32)).expect("cubemap id in range");
++            let gpu = if faces[0].width > max {
++                log::error!("cubemap faces {0}x{0} are too big (max {1}); using white", faces[0].width, max);
++                upload_cube(&self.device, &self.queue, &std::array::from_fn(|_| ImageData::solid(Color::WHITE)))
++            } else {
++                upload_cube(&self.device, &self.queue, faces)
++            };
++            self.cubemaps.push(gpu);
++        }
+     }
+ 
+ 
++    /// Skybox pipeline for the scene pass at `samples` MSAA (depth test off, no depth write).
++    fn ensure_sky_pipeline(&mut self, samples: u32) {
++        if self.sky_pipelines.contains_key(&samples) {
++            return;
++        }
++        let p = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
++            label: Some("spark sky"),
++            layout: Some(&self.sky_pipeline_layout),
++            vertex: wgpu::VertexState {
++                module: &self.sky_shader,
++                entry_point: Some("sky_vs"),
++                compilation_options: Default::default(),
++                buffers: &[],
++            },
++            primitive: Default::default(),
++            depth_stencil: Some(wgpu::DepthStencilState {
++                format: DEPTH_FORMAT,
++                depth_write_enabled: Some(false),
++                depth_compare: Some(wgpu::CompareFunction::Always),
++                stencil: Default::default(),
++                bias: Default::default(),
++            }),
++            multisample: wgpu::MultisampleState { count: samples, ..Default::default() },
++            fragment: Some(wgpu::FragmentState {
++                module: &self.sky_shader,
++                entry_point: Some("sky_fs"),
++                compilation_options: Default::default(),
++                targets: &[Some(self.scene_format.into())],
++            }),
++            multiview_mask: None,
++            cache: None,
++        });
++        self.sky_pipelines.insert(samples, p);
++    }
++
+     fn ensure_scene_target(&mut self, size: (u32, u32), samples: u32) {
+         let max = self.device.limits().max_texture_dimension_2d;
+         let size = (size.0.clamp(1, max), size.1.clamp(1, max));
+@@ -1287,13 +1391,26 @@ impl Renderer {
+         let shadow_size = rs.shadow_size.clamp(256, max_dim.min(8192));
+         let shadows = rs.shadows && si > 0.0 && rs.shadow_distance > 0.0;
+         if shadows && self.shadow.as_ref().is_none_or(|m| m.size != shadow_size) {
+-            let map = shadow_map(&self.device, shadow_size);
+-            self.frame_bind_group = frame_bind_group(&self.device, &self.frame_layout, &self.frame_buffer, &map.view, &self.shadow_sampler);
+-            self.shadow = Some(map);
+-        } else if !shadows && self.shadow.is_some() {
++            self.shadow = Some(shadow_map(&self.device, shadow_size));
++        } else if !shadows {
+             self.shadow = None;
+-            self.frame_bind_group =
+-                frame_bind_group(&self.device, &self.frame_layout, &self.frame_buffer, &self.shadow_dummy.view, &self.shadow_sampler);
++        }
++        let sky = scene.sky;
++        let sky_cube = sky.and_then(|s| s.cubemap).map(|c| c.0 as usize).filter(|&c| c < self.cubemaps.len());
++        let key = (self.shadow.as_ref().map(|m| m.size), sky_cube);
++        if key != self.frame_group_key {
++            let shadow_view = self.shadow.as_ref().map_or(&self.shadow_dummy.view, |m| &m.view);
++            let sky_view = sky_cube.map_or(&self.sky_dummy.view, |c| &self.cubemaps[c].view);
++            self.frame_bind_group = frame_bind_group(
++                &self.device,
++                &self.frame_layout,
++                &self.frame_buffer,
++                shadow_view,
++                &self.shadow_sampler,
++                sky_view,
++                &self.sky_sampler,
++            );
++            self.frame_group_key = key;
+         }
+         let light_vp = if shadows { sun_view_proj(cam, scene.sun.direction, rs.shadow_distance, shadow_size) } else { Mat4::IDENTITY };
+         let texel_world = rs.shadow_distance / shadow_size as f32;
+@@ -1323,6 +1440,17 @@ impl Renderer {
+             shadow_view_proj: light_vp.to_cols_array_2d(),
+             shadow: [flag(shadows), 1.0 / shadow_size as f32, texel_world * 1.5, rs.shadow_distance],
+             prev_view_proj: self.prev_view_proj.to_cols_array_2d(),
++            sky_top: sky.map_or([0.0; 4], |s| s.top.to_linear()),
++            sky_bottom: sky.map_or([0.0; 4], |s| s.bottom.to_linear()),
++            sky: match sky {
++                Some(s) => [
++                    1.0,
++                    if sky_cube.is_some() && s.blend > 0.0 { s.blend.min(1.0) } else { 0.0 }, // NaN -> 0
++                    s.lighting.max(0.0),
++                    sky_cube.map_or(1, |c| self.cubemaps[c].mips) as f32,
++                ],
++                None => [0.0; 4],
++            },
+         };
+         self.queue.write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&frame));
+         if shadows {
+@@ -1529,6 +1657,9 @@ impl Renderer {
+             }
+         }
+ 
++        if sky.is_some() {
++            self.ensure_sky_pipeline(samples);
++        }
+         let target = self.scene_target.as_ref().expect("scene target"); // ensure_scene_target() was called
+         let bg = scene.background.to_linear();
+         {
+@@ -1557,6 +1688,10 @@ impl Renderer {
+                 multiview_mask: None,
+             });
+             pass.set_bind_group(0, &self.frame_bind_group, &[]);
++            if sky.is_some() {
++                pass.set_pipeline(&self.sky_pipelines[&samples]); // ensure_sky_pipeline() above
++                pass.draw(0..3, 0..1);
++            }
+             let (mut last_pipe, mut last_shader, mut last_mesh, mut last_texture) =
+                 (None, None, usize::MAX, None::<(Option<usize>, Option<usize>)>);
+             for b in &batches {
+@@ -2129,6 +2264,8 @@ fn frame_bind_group(
+     buffer: &wgpu::Buffer,
+     shadow: &wgpu::TextureView,
+     sampler: &wgpu::Sampler,
++    sky: &wgpu::TextureView,
++    sky_sampler: &wgpu::Sampler,
+ ) -> wgpu::BindGroup {
+     device.create_bind_group(&wgpu::BindGroupDescriptor {
+         label: Some("spark frame"),
+@@ -2137,10 +2274,44 @@ fn frame_bind_group(
+             wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() },
+             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(shadow) },
+             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
++            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(sky) },
++            wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(sky_sampler) },
+         ],
+     })
+ }
+ 
++/// Uploads six square faces (+X, -X, +Y, -Y, +Z, -Z) with a full mip chain each.
++fn upload_cube(device: &wgpu::Device, queue: &wgpu::Queue, faces: &[ImageData; 6]) -> GpuCube {
++    let size = faces[0].width;
++    let mut mips = 1;
++    let mut data = Vec::new();
++    for face in faces {
++        let (levels, bytes) = build_mips(face);
++        mips = levels;
++        data.extend_from_slice(&bytes);
++    }
++    let texture = device.create_texture_with_data(
++        queue,
++        &wgpu::TextureDescriptor {
++            label: Some("spark sky cubemap"),
++            size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 6 },
++            mip_level_count: mips,
++            sample_count: 1,
++            dimension: wgpu::TextureDimension::D2,
++            format: COLOR_FORMAT,
++            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
++            view_formats: &[],
++        },
++        wgpu::util::TextureDataOrder::LayerMajor,
++        &data,
++    );
++    let view = texture.create_view(&wgpu::TextureViewDescriptor {
++        dimension: Some(wgpu::TextureViewDimension::Cube),
++        ..Default::default()
++    });
++    GpuCube { view, mips }
++}
++
+ /// Orthographic sun view around the camera, snapped to shadow texels so edges don't shimmer.
+ fn sun_view_proj(cam: &spark_core::Camera, sun_dir: Vec3, distance: f32, size: u32) -> Mat4 {
+     let dir = sun_dir.normalize_or(Vec3::NEG_Y);
+@@ -2494,6 +2665,65 @@ mod tests {
+         assert!(image.pixel(20, 32)[0] < 30, "LOD mesh replaces the full mesh: {:?}", image.pixel(20, 32));
+     }
+ 
++    /// Gradient sky: up shows `top`, down shows `bottom`; with a cubemap the face in view shows.
++    #[test]
++    fn sky_gradient_and_cubemap() {
++        use spark_core::{ImageData, Sky};
++        let Ok(mut r) = Renderer::new_headless(32, 32) else { return eprintln!("skipping GPU test: no adapter") };
++        let mut world = World::default();
++        world.scene.background = Color::BLACK;
++        world.scene.sky = Some(Sky::gradient(Color::rgb(0.0, 0.0, 1.0), Color::rgb(0.0, 1.0, 0.0)));
++        world.scene.camera.position = Vec3::ZERO;
++        world.scene.camera.look_at(Vec3::new(0.0, 10.0, -0.01)); // straight up
++        let up = r.screenshot(&world).expect("screenshot").pixel(16, 16);
++        world.scene.camera.look_at(Vec3::new(0.0, -10.0, -0.01)); // straight down
++        let down = r.screenshot(&world).expect("screenshot").pixel(16, 16);
++        assert!(up[2] > 200 && up[1] < 60, "up = {up:?}");
++        assert!(down[1] > 200 && down[2] < 60, "down = {down:?}");
++
++        // Faces: +X red, -X black, +Y black, -Y black, +Z black, -Z white (the camera looks along -Z).
++        let colors = [Color::rgb(1.0, 0.0, 0.0), Color::BLACK, Color::BLACK, Color::BLACK, Color::BLACK, Color::WHITE];
++        let cube = world.assets.add_cubemap(colors.map(|c| ImageData::new(4, 4, c.to_rgba8().repeat(16)))).unwrap();
++        world.scene.sky = Some(Sky::cubemap(cube));
++        let scope = r.device.push_error_scope(wgpu::ErrorFilter::Validation);
++        for samples in [4, 1] {
++            world.render.msaa = samples;
++            world.scene.camera.look_at(Vec3::new(0.0, 0.0, -10.0));
++            let fwd = r.screenshot(&world).expect("screenshot").pixel(16, 16);
++            assert!(fwd.iter().take(3).all(|&c| c > 200), "-Z face: {fwd:?}");
++            world.scene.camera.look_at(Vec3::new(10.0, 0.0, 0.0));
++            let right = r.screenshot(&world).expect("screenshot").pixel(16, 16);
++            assert!(right[0] > 200 && right[1] < 60, "+X face: {right:?}");
++        }
++        let error = pollster::block_on(scope.pop());
++        assert!(error.is_none(), "GPU validation error: {error:?}");
++    }
++
++    /// Sky lighting: in a scene with no ambient color and no sun, a white diffuse cube is lit by
++    /// the sky only when `lighting` is above 0, and a metal reflects the sky.
++    #[test]
++    fn sky_lights_the_scene() {
++        use spark_core::Sky;
++        let Ok(mut r) = Renderer::new_headless(32, 32) else { return eprintln!("skipping GPU test: no adapter") };
++        let mut world = World::default();
++        world.scene.ambient = Color::BLACK;
++        world.scene.sun.intensity = 0.0;
++        let cube = world.add_mesh(MeshData::cube(2.0));
++        let id = world.spawn(cube, Material::color(Color::WHITE));
++        world.scene.camera.position = Vec3::new(0.0, 0.0, 4.0);
++        world.scene.camera.look_at(Vec3::ZERO);
++        let sky = Sky::gradient(Color::rgb(0.8, 0.8, 0.8), Color::rgb(0.8, 0.8, 0.8));
++        world.scene.sky = Some(sky);
++        let dark = r.screenshot(&world).expect("screenshot").pixel(16, 16);
++        assert!(dark[0] < 20, "lighting 0 keeps the flat (black) ambient: {dark:?}");
++        world.scene.sky = Some(sky.with_lighting(1.0));
++        let lit = r.screenshot(&world).expect("screenshot").pixel(16, 16);
++        assert!(lit[0] > 150, "sky lights the cube: {lit:?}");
++        world.scene.get_mut(id).unwrap().material = Material::pbr(Color::WHITE, 1.0, 0.1);
++        let metal = r.screenshot(&world).expect("screenshot").pixel(16, 16);
++        assert!(metal[0] > 150, "metal reflects the sky: {metal:?}");
++    }
++
+     /// Values above 1 reach the tonemapper: Reinhard x / (1 + x) stays above 0.5 (sRGB 188) only
+     /// if the scene kept x > 1; an 8-bit scene clips to 1.0 first and gives exactly ~188.
+     #[test]
+diff --git a/crates/spark-script/src/api.rs b/crates/spark-script/src/api.rs
+index cf14314..f52843d 100644
+--- a/crates/spark-script/src/api.rs
++++ b/crates/spark-script/src/api.rs
+@@ -397,6 +397,15 @@ fn install_scene(lua: &Lua, g: &Table) -> LuaResult<()> {
+             with(lua, |w| Ok(w.scene.fog = fog))
+         })?,
+     )?;
++    g.set(
++        "sky",
++        lua.create_function(|lua, v: Value| {
++            with(lua, |w| {
++                let sky = to_sky(w, &v)?;
++                Ok(w.scene.sky = sky)
++            })
++        })?,
++    )?;
+     g.set("dump_scene", lua.create_function(|lua, ()| with(lua, |w| Ok(w.scene.dump())))?)?;
+     g.set("quit", lua.create_function(|lua, ()| with(lua, |w| Ok(w.quit())))?)?;
+     g.set("time", lua.create_userdata(TimeRef)?)?;
+@@ -471,3 +480,39 @@ pub(crate) fn install(lua: &Lua) -> LuaResult<()> {
+     g.set("window", lua.create_userdata(LuaWindow)?)?;
+     Ok(())
+ }
++
++/// `sky(nil | false | true | { top, bottom, cubemap, blend, lighting })`.
++fn to_sky(w: &mut World, v: &Value) -> LuaResult<Option<spark_core::Sky>> {
++    const KEYS: &str = "top, bottom, cubemap, blend, lighting";
++    let t = match v {
++        Value::Nil | Value::Boolean(false) => return Ok(None),
++        Value::Boolean(true) => return Ok(Some(spark_core::Sky::default())),
++        Value::Table(t) => t,
++        _ => return Err(rt(format!("sky: expected a table {{ {KEYS} }}, true or nil, got {}", v.type_name()))),
++    };
++    let mut sky = spark_core::Sky::default();
++    for pair in t.pairs::<String, Value>() {
++        let (k, x) = pair?;
++        let what = format!("sky.{k}");
++        match k.as_str() {
++            "top" => sky.top = to_color(&x, &what)?,
++            "bottom" => sky.bottom = to_color(&x, &what)?,
++            "cubemap" => {
++                sky.cubemap = match &x {
++                    Value::Nil | Value::Boolean(false) => None,
++                    Value::String(path) => {
++                        Some(w.assets.load_cubemap(&path.to_string_lossy()).map_err(|e| rt(format!("{what}: {e}")))?)
++                    }
++                    _ => return Err(rt(format!("{what}: expected an image path (a 6:1 strip of +X -X +Y -Y +Z -Z faces)"))),
++                }
++            }
++            "blend" => {
++                let b = to_num(&x, &what)?;
++                sky.blend = if b.is_nan() { 1.0 } else { b.clamp(0.0, 1.0) };
++            }
++            "lighting" => sky.lighting = to_num(&x, &what)?.max(0.0),
++            _ => return Err(rt(format!("sky: unknown option '{k}' (allowed: {KEYS})"))),
++        }
++    }
++    Ok(Some(sky))
++}
+diff --git a/crates/spark-script/tests/flow.rs b/crates/spark-script/tests/flow.rs
+index 82c2bfb..23c853e 100644
+--- a/crates/spark-script/tests/flow.rs
++++ b/crates/spark-script/tests/flow.rs
+@@ -4,8 +4,12 @@ use spark_core::{Game, World, run_frame};
+ use spark_script::ScriptGame;
+ 
+ fn run_script(name: &str, max_frames: u32) {
+-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/scripts").join(name);
+-    let mut game = ScriptGame::new(path).hot_reload(false);
++    run_script_at(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/scripts").join(name), max_frames);
++}
++
++fn run_script_at(path: &std::path::Path, max_frames: u32) {
++    let name = path.file_name().unwrap().to_string_lossy().into_owned();
++    let mut game = ScriptGame::new(path.to_path_buf()).hot_reload(false);
+     let mut world = World::new();
+     world.physics.set_backend(Box::new(spark_physics::RapierBackend::new()));
+     game.start(&mut world);
+@@ -41,6 +45,21 @@ fn pbr_contract() {
+     run_script("pbr.luau", 10);
+ }
+ 
++/// Runs from a temp folder next to generated images (a valid 6:1 cubemap strip and a square one).
++#[test]
++fn sky_contract() {
++    use spark_core::{Color, ImageData};
++    let dir = std::env::temp_dir().join(format!("spark-sky-contract-{}", std::process::id()));
++    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/scripts/sky.luau");
++    std::fs::create_dir_all(dir.join("assets")).unwrap();
++    std::fs::copy(src, dir.join("sky.luau")).unwrap();
++    ImageData::checker(12, 6, Color::WHITE, Color::BLACK).save_png(&dir.join("assets/not_a_strip.png")).unwrap();
++    let strip = ImageData::new(12, 2, [40, 90, 200, 255].repeat(24));
++    strip.save_png(&dir.join("assets/sky_strip.png")).unwrap();
++    run_script_at(&dir.join("sky.luau"), 10);
++    let _ = std::fs::remove_dir_all(&dir);
++}
++
+ #[test]
+ fn models_contract() {
+     run_script("models.luau", 2000);
+diff --git a/crates/spark-script/tests/scripts/sky.luau b/crates/spark-script/tests/scripts/sky.luau
+new file mode 100644
+index 0000000..95c0560
+--- /dev/null
++++ b/crates/spark-script/tests/scripts/sky.luau
+@@ -0,0 +1,22 @@
++-- sky(): gradient / cubemap sky and sky lighting; argument errors. Run by flow.rs from a temp folder
++-- with generated images in assets/.
++sky({ top = "sky", bottom = "#303030" })
++sky({ top = Color.rgb(0.2, 0.4, 0.9), bottom = "black", lighting = 1, blend = 0.5 })
++sky(true)
++sky(nil)
++sky(false)
++sky({ cubemap = false })
++sky({ cubemap = "assets/sky_strip.png", lighting = 0.8 })
++sky({ cubemap = "assets/sky_strip.png" }) -- cached by path
++
++assert(not pcall(sky, { tpo = "red" }), "typos are reported")
++assert(not pcall(sky, { top = true }), "colors are checked")
++assert(not pcall(sky, { cubemap = 1 }), "cubemap needs a path")
++assert(not pcall(sky, { cubemap = "missing_sky.png" }), "missing files are errors")
++local ok, err = pcall(sky, { cubemap = "assets/not_a_strip.png" })
++assert(not ok and string.find(tostring(err), "6"), "a cubemap must be a 6:1 strip: " .. tostring(err))
++assert(not pcall(sky, 42), "sky needs a table")
++
++function update()
++    quit()
++end
+diff --git a/docs/LUAU_API.md b/docs/LUAU_API.md
+index 8bf73ed..3734629 100644
+--- a/docs/LUAU_API.md
++++ b/docs/LUAU_API.md
+@@ -380,6 +380,12 @@ t:cancel()
+ - Default camera: position (0, 3, 8) looking at the origin.
+ - `sun(direction, color?, intensity?)` - direction the light travels, e.g. `vec3(-0.5, -1, -0.3)`
+ - `ambient(color)`, `background(color)`, `fog(color, near=10, far=60)`, `fog(nil)` to disable
++- `sky({ top = "sky", bottom = "#40382f", cubemap = "sky.png", blend = 1, lighting = 0 })` - sky behind everything
++  instead of the flat background; every key is optional, `sky(true)` = default blue sky, `sky(nil)` to remove.
++  `top` / `bottom` = gradient colors straight up / down; `cubemap` = image path of a 6:1 horizontal strip of square
++  faces in +X, -X, +Y, -Y, +Z, -Z order (cached by path), drawn over the gradient with `blend` (0..1);
++  `lighting` = image-based lighting strength: 0 keeps `ambient()`, above 0 the sky lights objects from every
++  direction (blue from above, ground color from below) and PBR metals reflect it (rougher = blurrier)
+ - Point / spot lights (up to 32 nearest visible lights per frame; any object can carry one):
+   - `light({ type = "point", color = "#ffd9a0", intensity = 1.5, range = 8, position = vec3(0, 3, 0) })` -> Object (invisible, only light)
+   - `light({ type = "spot", angle = 30, softness = 0.3, ... })` - cone along the object's forward (-Z); aim with `rotation` or `obj:look_at(...)`
+diff --git a/docs/SHADERS.md b/docs/SHADERS.md
+index ddecac3..b7ec90d 100644
+--- a/docs/SHADERS.md
++++ b/docs/SHADERS.md
+@@ -56,6 +56,7 @@ frame.fog_color.rgb, frame.fog                              // fog: near, far, e
+ frame.light_count.x, frame.lights[i]                        // Light { position(xyz, w=range), color(rgb, w=1 spot), direction(xyz, w=cos outer), params(x=cos inner) }
+ frame.shadow_view_proj, frame.shadow                        // sun shadow map: world -> shadow clip; enabled, 1/size, normal offset, distance
+ frame.prev_view_proj                                        // view_proj of the previous frame (motion vectors, reprojection)
++frame.sky_top.rgb, frame.sky_bottom.rgb, frame.sky          // sky gradient (linear); enabled, cubemap blend, lighting, cubemap mips
+ frame.prev_view_proj                                        // view_proj of the previous frame (motion vectors, reprojection)
+ params                                                      // your struct Params
+ texture1, texture2, linear_sampler, nearest_sampler
+@@ -98,6 +99,9 @@ surface_normal(world_pos, normal, uv) -> vec3<f32>  // normal with the material
+ pbr_lighting(world_pos, normal, base_rgb, metallic, roughness) -> vec3<f32>  // PBR version of base * lighting()
+ sun_shadow(world_pos, normal) -> f32       // 1 = lit, 0 = in the sun's shadow (PCF); 1 when shadows are off
+ apply_fog(rgb, world_pos) -> vec3<f32>
++sky_color(dir, blur) -> vec3<f32>          // sky in a world direction (blur 0 = sharp .. 1 = blurriest mip); black without a sky
++ambient_light(normal) -> vec3<f32>         // indirect light: the sky with sky lighting on, else frame.ambient
++ambient_reflection(dir, roughness) -> vec3<f32>  // environment reflection along `dir` (PBR specular ambient)
+ default_fragment(f) -> vec4<f32>
+ ```
+ 
+diff --git a/docs/spark.d.luau b/docs/spark.d.luau
+index ab5a056..c225187 100644
+--- a/docs/spark.d.luau
++++ b/docs/spark.d.luau
+@@ -429,6 +429,8 @@ declare function sun(direction: vector, color: ColorLike?, intensity: number?):
+ declare function ambient(color: ColorLike): ()
+ declare function background(color: ColorLike): ()
+ declare function fog(color: ColorLike?, near: number?, far: number?): ()
++type SkySpec = { top: ColorLike?, bottom: ColorLike?, cubemap: (string | false)?, blend: number?, lighting: number? }
++declare function sky(spec: (SkySpec | boolean)?): ()
+ 
+ type BloomSettings = { threshold: number?, knee: number?, strength: number?, radius: number? } | boolean
+ type SsaoSettings = { radius: number?, samples: number?, strength: number?, bias: number? } | boolean
