@@ -147,7 +147,7 @@ impl Ui {
     }
 
     /// True when the cursor is over UI drawn this frame or the previous one: lets the game ignore
-    /// clicks meant for the UI (e.g. `if mouse.pressed("left") and not ui.hovered() then shoot() end`).
+    /// clicks meant for the UI (e.g. `if input.mouse_pressed("left") and not ui.hovered() then shoot() end`).
     pub fn hovered(&self) -> bool {
         self.over || self.over_prev
     }
