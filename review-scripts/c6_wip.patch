@@ -1,0 +1,1054 @@
+diff --git a/README.md b/README.md
+index 1436c8c..8f7f372 100644
+--- a/README.md
++++ b/README.md
+@@ -55,7 +55,7 @@ Spark does not try to compete with Unity, Unreal or Godot. It has a different jo
+ 
+ | Module | What you get |
+ |---|---|
+-| **Render** | wgpu (Vulkan / DirectX 12 / Metal / OpenGL fallback). 3D meshes and primitives, glTF 2.0 models with skins and animations, sun / point / spot lights, fog, HDR scene, built-in post effects (bloom, tonemapping, SSAO, depth of field, motion blur, color grading, FXAA, vignette, film grain, chromatic aberration; all off by default), your own WGSL surface and full-screen post shaders with hot reload ([docs/SHADERS.md](docs/SHADERS.md)), low internal resolution for weak PCs |
++| **Render** | wgpu (Vulkan / DirectX 12 / Metal / OpenGL fallback). 3D meshes and primitives, glTF 2.0 models with skins and animations, sun / point / spot lights, optional PBR materials (metallic / roughness, normal maps, emissive), mesh LOD, fog, HDR scene, built-in post effects (bloom, tonemapping, SSAO, depth of field, motion blur, color grading, FXAA, vignette, film grain, chromatic aberration; all off by default), your own WGSL surface and full-screen post shaders with hot reload ([docs/SHADERS.md](docs/SHADERS.md)), low internal resolution for weak PCs |
+ | **2D** | immediate-mode drawing: sprites and sprite sheets, text with any TTF/OTF font, shapes, transforms, UI and in-scene layers, immediate-mode UI widgets (buttons, sliders, checkboxes, panels, progress bars) |
+ | **Script** | Luau runtime with hot reload, modules (`require`), timers, coroutine tasks with `wait`, tweens |
+ | **Input** | full keyboard (punctuation, numpad, F1-F24), text input with IME, key repeat, mouse with side buttons and FPS mouse lock, gamepads with hot-plug |
+diff --git a/README.ru.md b/README.ru.md
+index 8e3ad80..71fc474 100644
+--- a/README.ru.md
++++ b/README.ru.md
+@@ -57,7 +57,7 @@ SPARK не пытается тягаться с Unity, Unreal Engine или Godo
+ 
+ | Модуль | Что умеет |
+ |---|---|
+-| **Render** | wgpu (Vulkan / DirectX 12 / Metal / запасной OpenGL). 3D-меши и примитивы, модели glTF 2.0 со скелетом и анимациями, солнце / точечные и прожекторные источники света, туман, HDR-сцена, встроенные пост-эффекты (bloom, тонмаппинг, SSAO, глубина резкости, motion blur, цветокоррекция, FXAA, виньетка, зерно, хроматическая аберрация; по умолчанию выключены), свои WGSL-шейдеры поверхностей и пост-процессинга с горячей перезагрузкой ([docs/SHADERS.md](docs/SHADERS.md)), низкое внутреннее разрешение для слабых ПК |
++| **Render** | wgpu (Vulkan / DirectX 12 / Metal / запасной OpenGL). 3D-меши и примитивы, модели glTF 2.0 со скелетом и анимациями, солнце / точечные и прожекторные источники света, PBR-материалы по желанию (metallic / roughness, карты нормалей, свечение), LOD мешей, туман, HDR-сцена, встроенные пост-эффекты (bloom, тонмаппинг, SSAO, глубина резкости, motion blur, цветокоррекция, FXAA, виньетка, зерно, хроматическая аберрация; по умолчанию выключены), свои WGSL-шейдеры поверхностей и пост-процессинга с горячей перезагрузкой ([docs/SHADERS.md](docs/SHADERS.md)), низкое внутреннее разрешение для слабых ПК |
+ | **2D** | immediate-mode отрисовка: спрайты и спрайт-листы, текст любым TTF/OTF-шрифтом, фигуры, трансформации, слои UI и сцены, immediate-mode UI-виджеты (кнопки, слайдеры, чекбоксы, панели, прогресс-бары) |
+ | **Script** | рантайм Luau с горячей перезагрузкой, модули (`require`), таймеры, задачи-корутины с `wait`, твины |
+ | **Input** | полная клавиатура (пунктуация, numpad, F1-F24), ввод текста с IME, автоповтор, мышь с боковыми кнопками и захватом для FPS, геймпады с горячим подключением |
+diff --git a/crates/spark-core/src/material.rs b/crates/spark-core/src/material.rs
+index 3d05a7f..9efb5d6 100644
+--- a/crates/spark-core/src/material.rs
++++ b/crates/spark-core/src/material.rs
+@@ -59,6 +59,17 @@ pub struct Material {
+     pub double_sided: bool,
+     /// Casts a shadow from the sun (`RenderSettings::shadows`).
+     pub cast_shadow: bool,
++    /// Physically based shading (Cook-Torrance GGX with `metallic` / `roughness`) instead of the
++    /// classic diffuse look. Turned on by [`Material::pbr`], `with_metallic`, `with_roughness`.
++    pub pbr: bool,
++    /// 0 = dielectric (plastic, wood, stone), 1 = metal. Used when `pbr` is on.
++    pub metallic: f32,
++    /// 0 = mirror-smooth, 1 = fully rough. Used when `pbr` is on.
++    pub roughness: f32,
++    /// Light the surface emits by itself, added after lighting (black = none). Works in every mode.
++    pub emissive: Color,
++    /// Tangent-space normal map (OpenGL convention: green points along +V). Works with and without `pbr`.
++    pub normal_map: Option<TextureId>,
+ }
+ 
+ impl Default for Material {
+@@ -73,6 +84,11 @@ impl Default for Material {
+             blend: BlendMode::Auto,
+             double_sided: false,
+             cast_shadow: true,
++            pbr: false,
++            metallic: 0.0,
++            roughness: 0.5,
++            emissive: Color::BLACK,
++            normal_map: None,
+         }
+     }
+ }
+@@ -146,6 +162,35 @@ impl Material {
+         self.data = data;
+         self
+     }
++
++    /// PBR material: base `color`, `metallic` (0..1) and `roughness` (0..1).
++    pub fn pbr(color: Color, metallic: f32, roughness: f32) -> Self {
++        Self::color(color).with_metallic(metallic).with_roughness(roughness)
++    }
++
++    /// Sets `metallic` (clamped to 0..1) and turns on PBR shading.
++    pub fn with_metallic(mut self, metallic: f32) -> Self {
++        self.metallic = metallic.max(0.0).min(1.0); // NaN -> 0
++        self.pbr = true;
++        self
++    }
++
++    /// Sets `roughness` (clamped to 0..1) and turns on PBR shading.
++    pub fn with_roughness(mut self, roughness: f32) -> Self {
++        self.roughness = roughness.max(0.0).min(1.0); // NaN -> 0
++        self.pbr = true;
++        self
++    }
++
++    pub fn with_emissive(mut self, emissive: Color) -> Self {
++        self.emissive = emissive;
++        self
++    }
++
++    pub fn with_normal_map(mut self, normal_map: Option<TextureId>) -> Self {
++        self.normal_map = normal_map;
++        self
++    }
+ }
+ 
+ #[cfg(test)]
+@@ -181,4 +226,24 @@ mod tests {
+         assert!(m.double_sided);
+         assert_eq!(m.tiling, Vec2::new(2.0, 3.0));
+     }
++
++    #[test]
++    fn pbr_is_opt_in() {
++        let m = Material::default();
++        assert!(!m.pbr, "existing games keep the classic look");
++        assert_eq!((m.metallic, m.roughness, m.emissive, m.normal_map), (0.0, 0.5, Color::BLACK, None));
++    }
++
++    #[test]
++    fn pbr_builders_clamp_and_enable() {
++        let m = Material::pbr(Color::RED, 2.0, -1.0);
++        assert!(m.pbr);
++        assert_eq!((m.metallic, m.roughness), (1.0, 0.0));
++        assert_eq!(m.color, Color::RED);
++        assert!(Material::default().with_roughness(0.5).pbr, "even the default value turns PBR on");
++        let n = Material::pbr(Color::RED, f32::NAN, f32::NAN);
++        assert_eq!((n.metallic, n.roughness), (0.0, 0.0), "NaN never reaches the shader");
++        let e = Material::default().with_emissive(Color::BLUE);
++        assert!(!e.pbr, "emissive works without PBR");
++    }
+ }
+diff --git a/crates/spark-core/src/model.rs b/crates/spark-core/src/model.rs
+index 1939693..d37c31e 100644
+--- a/crates/spark-core/src/model.rs
++++ b/crates/spark-core/src/model.rs
+@@ -263,6 +263,13 @@ impl ModelData {
+                         gltf::material::AlphaMode::Blend => crate::material::BlendMode::Alpha,
+                         _ => crate::material::BlendMode::Opaque,
+                     },
++                    // Kept for `obj.pbr = true`; models keep the classic look by default.
++                    metallic: pbr.metallic_factor().clamp(0.0, 1.0),
++                    roughness: pbr.roughness_factor().clamp(0.0, 1.0),
++                    emissive: {
++                        let e = m.emissive_factor();
++                        Color::rgb(to_srgb(e[0]), to_srgb(e[1]), to_srgb(e[2]))
++                    },
+                     ..Default::default()
+                 };
+                 if let Some(info) = pbr.base_color_texture() {
+@@ -271,6 +278,12 @@ impl ModelData {
+                         Err(e) => log::warn!("{}: {e}", model.name),
+                     }
+                 }
++                if let Some(info) = m.normal_texture() {
++                    match image(info.texture().source().index(), assets) {
++                        Ok(id) => material.normal_map = Some(id),
++                        Err(e) => log::warn!("{}: {e}", model.name),
++                    }
++                }
+                 let mesh_id = assets.add_mesh(MeshData::new(vertices, indices));
+                 prims.push(Primitive { mesh: mesh_id, material, skin });
+             }
+diff --git a/crates/spark-core/src/scene.rs b/crates/spark-core/src/scene.rs
+index a4f8dd5..f9ca022 100644
+--- a/crates/spark-core/src/scene.rs
++++ b/crates/spark-core/src/scene.rs
+@@ -42,6 +42,10 @@ pub struct Object {
+     pub rotation: Quat,
+     pub scale: Vec3,
+     pub mesh: Option<MeshId>,
++    /// Level of detail: `(distance, mesh)` pairs. From `distance` meters away from the camera on
++    /// the renderer draws that mesh instead of `mesh` (the entry with the largest distance that is
++    /// reached wins; order does not matter). Picking, physics and bounds use `mesh`.
++    pub lod: Vec<(f32, MeshId)>,
+     pub material: Material,
+     pub visible: bool,
+     /// Rigid body simulated by the physics backend (`None` = not physical).
+@@ -76,6 +80,7 @@ impl Object {
+             rotation: Quat::IDENTITY,
+             scale: Vec3::ONE,
+             mesh: None,
++            lod: Vec::new(),
+             material: Material::default(),
+             visible: true,
+             body: None,
+@@ -87,6 +92,17 @@ impl Object {
+         }
+     }
+ 
++    /// Mesh drawn at `distance` meters from the camera: the [`Object::lod`] entry with the
++    /// largest distance not above `distance`, or [`Object::mesh`] when none is reached.
++    pub fn mesh_at(&self, distance: f32) -> Option<MeshId> {
++        self.lod
++            .iter()
++            .filter(|(d, _)| *d <= distance)
++            .max_by(|a, b| a.0.total_cmp(&b.0))
++            .map(|(_, m)| *m)
++            .or(self.mesh)
++    }
++
+     /// Direct children of this object.
+     pub fn child_ids(&self) -> &[ObjectId] {
+         &self.children
+@@ -616,6 +632,19 @@ impl std::ops::IndexMut<ObjectId> for Scene {
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++
++    #[test]
++    fn lod_picks_the_farthest_reached_level() {
++        let mut o = Object::empty();
++        o.mesh = Some(MeshId(0));
++        o.lod = vec![(40.0, MeshId(2)), (10.0, MeshId(1))]; // any order
++        assert_eq!(o.mesh_at(0.0), Some(MeshId(0)));
++        assert_eq!(o.mesh_at(9.9), Some(MeshId(0)));
++        assert_eq!(o.mesh_at(10.0), Some(MeshId(1)));
++        assert_eq!(o.mesh_at(39.0), Some(MeshId(1)));
++        assert_eq!(o.mesh_at(1000.0), Some(MeshId(2)));
++        assert_eq!(Object::empty().mesh_at(5.0), None);
++    }
+     use crate::physics::{Body, BodyKind};
+ 
+     #[test]
+diff --git a/crates/spark-core/src/shaders/surface.wgsl b/crates/spark-core/src/shaders/surface.wgsl
+index 6fb2e61..92616f3 100644
+--- a/crates/spark-core/src/shaders/surface.wgsl
++++ b/crates/spark-core/src/shaders/surface.wgsl
+@@ -4,7 +4,9 @@ struct Object {
+     normal_matrix: mat4x4<f32>,
+     color: vec4<f32>,  // material color, linear
+     data: vec4<f32>,   // material.data: free for your shader
+-    info: vec4<f32>,   // tiling x, tiling y, unlit (0 / 1), -
++    info: vec4<f32>,   // tiling x, tiling y, unlit (0 / 1), pbr (0 / 1)
++    pbr: vec4<f32>,    // metallic, roughness, has normal map (0 / 1), -
++    emissive: vec4<f32>, // rgb, linear
+ };
+ 
+ // Per-object data of every drawn object (instanced draws). `object` = the one being drawn.
+@@ -15,6 +17,8 @@ var<private> object: Object;
+ @group(0) @binding(2) var spark_shadow_sampler: sampler_comparison;
+ @group(2) @binding(0) var base_texture: texture_2d<f32>;
+ @group(2) @binding(1) var base_sampler: sampler;
++// Material normal map (a flat 1x1 map when the material has none). See `surface_normal`.
++@group(2) @binding(2) var normal_texture: texture_2d<f32>;
+ @group(3) @binding(0) var<uniform> params: Params;
+ @group(3) @binding(1) var texture1: texture_2d<f32>;
+ @group(3) @binding(2) var texture2: texture_2d<f32>;
+@@ -105,6 +109,109 @@ fn lighting(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+     return light;
+ }
+ 
++// ─── Normal maps ───────────────────────────────────────────────
++
++// Shading normal: the geometric normal tilted by the material's tangent-space normal map
++// (OpenGL convention, green = +V). Tangents come from screen-space derivatives (no tangent
++// attribute needed); materials without a normal map sample a flat 1x1 map, so the result is the
++// geometric normal. Call it in uniform control flow (it uses derivatives).
++fn surface_normal(world_pos: vec3<f32>, normal: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
++    let n = normalize(normal);
++    // Normal maps hold data, not colors: undo the sRGB decode of the color texture format.
++    let tn = linear_to_srgb(textureSample(normal_texture, base_sampler, uv).rgb) * 2.0 - 1.0;
++    let dp1 = dpdx(world_pos);
++    let dp2 = dpdy(world_pos);
++    let duv1 = dpdx(uv);
++    let duv2 = dpdy(uv);
++    let dp2perp = cross(dp2, n);
++    let dp1perp = cross(n, dp1);
++    let t = dp2perp * duv1.x + dp1perp * duv2.x;
++    let b = dp2perp * duv1.y + dp1perp * duv2.y;
++    let scale = max(dot(t, t), dot(b, b));
++    let inv = inverseSqrt(max(scale, 1e-30));
++    let mapped = normalize(t * inv * tn.x + b * inv * tn.y + n * tn.z);
++    // No normal map, or degenerate UVs (no tangent frame): keep the geometric normal.
++    return select(mapped, n, object.pbr.z < 0.5 || scale < 1e-20);
++}
++
++// ─── PBR (metallic / roughness, Cook-Torrance GGX) ─────────────
++
++const PI: f32 = 3.14159265359;
++
++// Split-sum environment BRDF, analytic fit (Karis, "Physically Based Shading on Mobile").
++fn env_brdf_approx(roughness: f32, n_dot_v: f32) -> vec2<f32> {
++    let c0 = vec4<f32>(-1.0, -0.0275, -0.572, 0.022);
++    let c1 = vec4<f32>(1.0, 0.0425, 1.04, -0.04);
++    let r = roughness * c0 + c1;
++    let a004 = min(r.x * r.x, exp2(-9.28 * n_dot_v)) * r.x + r.y;
++    return vec2<f32>(-1.04, 1.04) * a004 + r.zw;
++}
++
++// Reflected light for one light direction `l` with irradiance `radiance` (light color * attenuation).
++// Light colors use the same convention as the classic shader: a white light at normal incidence
++// lights a white diffuse surface to its full color (the BRDF is scaled by PI).
++fn pbr_direct(n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, radiance: vec3<f32>, base: vec3<f32>, metallic: f32, roughness: f32) -> vec3<f32> {
++    let n_dot_l = max(dot(n, l), 0.0);
++    if (n_dot_l <= 0.0) {
++        return vec3<f32>(0.0);
++    }
++    let n_dot_v = max(dot(n, v), 1e-4);
++    let h = normalize(v + l);
++    let n_dot_h = max(dot(n, h), 0.0);
++    let alpha = roughness * roughness;
++    let a2 = alpha * alpha;
++    let d_denom = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
++    let d = a2 / (PI * d_denom * d_denom);
++    let k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
++    let g = (n_dot_v / (n_dot_v * (1.0 - k) + k)) * (n_dot_l / (n_dot_l * (1.0 - k) + k));
++    let f0 = mix(vec3<f32>(0.04), base, metallic);
++    let f = f0 + (1.0 - f0) * pow(1.0 - max(dot(h, v), 0.0), 5.0);
++    let specular = d * g * f / (4.0 * n_dot_v * n_dot_l);
++    let diffuse = (1.0 - f) * (1.0 - metallic) * base;
++    return (diffuse + specular * PI) * radiance * n_dot_l;
++}
++
++// Ambient light on a PBR surface: diffuse plus a rough environment reflection of the ambient color
++// (so metals are not black without lights).
++fn pbr_ambient(n: vec3<f32>, v: vec3<f32>, base: vec3<f32>, metallic: f32, roughness: f32) -> vec3<f32> {
++    let n_dot_v = max(dot(n, v), 1e-4);
++    let f0 = mix(vec3<f32>(0.04), base, metallic);
++    let env = env_brdf_approx(roughness, n_dot_v);
++    let specular = f0 * env.x + env.y;
++    return frame.ambient.rgb * ((1.0 - specular) * (1.0 - metallic) * base + specular);
++}
++
++// Full PBR lighting of a surface point: ambient + sun (with shadows) + point / spot lights.
++fn pbr_lighting(world_pos: vec3<f32>, normal: vec3<f32>, base: vec3<f32>, metallic: f32, roughness: f32) -> vec3<f32> {
++    let n = normalize(normal);
++    let v = normalize(frame.camera_pos.xyz - world_pos);
++    let r = clamp(roughness, 0.045, 1.0); // a perfect mirror has no highlight for point lights
++    let m = clamp(metallic, 0.0, 1.0);
++    var rgb = pbr_ambient(n, v, base, m, r);
++    let sun_l = normalize(-frame.sun_dir.xyz);
++    if (dot(n, sun_l) > 0.0) {
++        rgb = rgb + pbr_direct(n, v, sun_l, frame.sun_color.rgb * sun_shadow(world_pos, n), base, m, r);
++    }
++    for (var i = 0u; i < frame.light_count.x; i = i + 1u) {
++        let li = frame.lights[i];
++        let to_light = li.position.xyz - world_pos;
++        let dist = length(to_light);
++        let range = li.position.w;
++        if (dist >= range) {
++            continue;
++        }
++        let ldir = to_light / max(dist, 0.0001);
++        let x = dist / range;
++        let window = clamp(1.0 - x * x, 0.0, 1.0);
++        var att = window * window / (1.0 + 4.0 * x * x);
++        if (li.color.w > 0.5) {
++            att = att * smoothstep(li.direction.w, li.params.x, dot(-ldir, li.direction.xyz));
++        }
++        rgb = rgb + pbr_direct(n, v, ldir, li.color.rgb * att, base, m, r);
++    }
++    return rgb;
++}
++
+ fn apply_fog(rgb: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
+     if (frame.fog.z < 0.5) {
+         return rgb;
+@@ -118,10 +225,16 @@ fn default_fragment(f: Fragment) -> vec4<f32> {
+     if (base.a < 0.01) {
+         discard;
+     }
++    let n = surface_normal(f.world_pos, f.normal, f.uv);
+     var rgb = base.rgb;
+     if (object.info.z < 0.5) {
+-        rgb = rgb * lighting(f.world_pos, f.normal);
++        if (object.info.w > 0.5) {
++            rgb = pbr_lighting(f.world_pos, n, base.rgb, object.pbr.x, object.pbr.y);
++        } else {
++            rgb = rgb * lighting(f.world_pos, n);
++        }
+     }
++    rgb = rgb + object.emissive.rgb;
+     return vec4<f32>(apply_fog(rgb, f.world_pos), base.a);
+ }
+ 
+diff --git a/crates/spark-render/src/lib.rs b/crates/spark-render/src/lib.rs
+index bcbc50c..060a2a0 100644
+--- a/crates/spark-render/src/lib.rs
++++ b/crates/spark-render/src/lib.rs
+@@ -94,8 +94,12 @@ struct ObjectUniform {
+     normal_matrix: [[f32; 4]; 4],
+     color: [f32; 4],
+     data: [f32; 4],
+-    /// tiling x, tiling y, unlit, -
++    /// tiling x, tiling y, unlit, pbr
+     info: [f32; 4],
++    /// metallic, roughness, has normal map, -
++    pbr: [f32; 4],
++    /// rgb (linear), -
++    emissive: [f32; 4],
+ }
+ 
+ /// Matches `struct PassInfo` in spark-core/src/shaders/post.wgsl.
+@@ -202,6 +206,7 @@ struct Candidate {
+     variant: u8,
+     mesh: usize,
+     texture: Option<usize>,
++    normal_map: Option<usize>,
+     /// View-space distance (transparent sorting).
+     depth: f32,
+     in_view: bool,
+@@ -215,6 +220,7 @@ struct Batch3 {
+     variant: u8,
+     mesh: usize,
+     texture: Option<usize>,
++    normal_map: Option<usize>,
+     /// Byte offset of the batch's first object (dynamic uniform offset).
+     offset: u32,
+     count: u32,
+@@ -308,6 +314,10 @@ pub struct Renderer {
+     meshes: Vec<Option<GpuMesh>>,
+     textures: Vec<GpuTexture>,
+     white: GpuTexture,
++    /// Flat tangent-space normal (bound as `normal_texture` when a material has no normal map).
++    flat_normal: wgpu::TextureView,
++    /// Texture bind groups of normal-mapped materials: (base texture, normal map, nearest).
++    normal_mapped_groups: HashMap<(Option<usize>, usize, bool), wgpu::BindGroup>,
+     assets_generation: u64,
+     /// `Assets::mesh_edits` already applied.
+     mesh_edits: u64,
+@@ -680,7 +690,8 @@ impl Renderer {
+                 count: None,
+             }],
+         );
+-        let texture_layout = bind_group_layout(&device, "spark texture", &[texture_entry(0, fs), sampler_entry(1, fs)]);
++        // Base texture, its sampler and the material normal map (2D canvas uses only the first two).
++        let texture_layout = bind_group_layout(&device, "spark texture", &[texture_entry(0, fs), sampler_entry(1, fs), texture_entry(2, fs)]);
+         let shader_layout = bind_group_layout(
+             &device,
+             "spark shader resources",
+@@ -807,8 +818,34 @@ impl Renderer {
+             bind_group_layouts: &[Some(&post_layout), Some(&shader_layout)],
+             immediate_size: 0,
+         });
+-        let white =
+-            upload_texture(&device, &queue, &texture_layout, &texture_samplers, &ImageData::solid(Color::WHITE), COLOR_FORMAT, false);
++        // (128, 128, 255) = +Z in tangent space; read back as data by `surface_normal`.
++        let flat_normal = device
++            .create_texture_with_data(
++                &queue,
++                &wgpu::TextureDescriptor {
++                    label: Some("spark flat normal"),
++                    size: extent((1, 1)),
++                    mip_level_count: 1,
++                    sample_count: 1,
++                    dimension: wgpu::TextureDimension::D2,
++                    format: COLOR_FORMAT,
++                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
++                    view_formats: &[],
++                },
++                wgpu::util::TextureDataOrder::LayerMajor,
++                &[128, 128, 255, 255],
++            )
++            .create_view(&Default::default());
++        let white = upload_texture(
++            &device,
++            &queue,
++            &texture_layout,
++            &texture_samplers,
++            &flat_normal,
++            &ImageData::solid(Color::WHITE),
++            COLOR_FORMAT,
++            false,
++        );
+ 
+         let builtin = |name: &str, code: &str| {
+             // built-in shaders are known-good at compile time.
+@@ -908,6 +945,8 @@ impl Renderer {
+             meshes: Vec::new(),
+             textures: Vec::new(),
+             white,
++            flat_normal,
++            normal_mapped_groups: HashMap::new(),
+             assets_generation: u64::MAX,
+             mesh_edits: 0,
+             candidates: Vec::new(),
+@@ -949,6 +988,7 @@ impl Renderer {
+         if assets.generation() != self.assets_generation {
+             self.meshes.clear();
+             self.textures.clear();
++            self.normal_mapped_groups.clear();
+             self.shaders.clear();
+             self.assets_generation = assets.generation();
+         }
+@@ -994,9 +1034,9 @@ impl Renderer {
+             let gpu = if image.width == 0 || image.height == 0 || image.width > max || image.height > max {
+                 log::error!("texture {}x{} is not supported (max {max}x{max}); using magenta", image.width, image.height);
+                 let magenta = ImageData::solid(Color::hex(0xff00ff));
+-                upload_texture(&self.device, &self.queue, &self.texture_layout, &self.texture_samplers, &magenta, COLOR_FORMAT, false)
++                upload_texture(&self.device, &self.queue, &self.texture_layout, &self.texture_samplers, &self.flat_normal, &magenta, COLOR_FORMAT, false)
+             } else {
+-                upload_texture(&self.device, &self.queue, &self.texture_layout, &self.texture_samplers, image, COLOR_FORMAT, true)
++                upload_texture(&self.device, &self.queue, &self.texture_layout, &self.texture_samplers, &self.flat_normal, image, COLOR_FORMAT, true)
+             };
+             self.textures.push(gpu);
+         }
+@@ -1098,7 +1138,7 @@ impl Renderer {
+                 }
+                 _ => {
+                     self.glyphs =
+-                        Some(upload_texture(&self.device, &self.queue, &self.texture_layout, &self.texture_samplers, atlas, GLYPH_FORMAT, false));
++                        Some(upload_texture(&self.device, &self.queue, &self.texture_layout, &self.texture_samplers, &self.flat_normal, atlas, GLYPH_FORMAT, false));
+                 }
+             }
+             self.glyph_version = fonts.version();
+@@ -1295,9 +1335,9 @@ impl Renderer {
+         let mut stats = FrameStats { internal_size: internal, ..Default::default() };
+         let fallback = self.asset_shader(rs.shader, ShaderKind::Surface).unwrap_or(ShaderRef::Default);
+         for (id, obj) in scene.iter() {
+-            let Some(mesh) = obj.mesh else { continue };
+-            let mesh = mesh.0 as usize;
+-            let Some(Some(gpu_mesh)) = self.meshes.get(mesh) else { continue };
++            if obj.mesh.is_none() {
++                continue;
++            }
+             let i = id.index() as usize;
+             if !vis[i] {
+                 continue;
+@@ -1305,6 +1345,11 @@ impl Renderer {
+             let model = mats[i];
+             let m = &obj.material;
+             let bounds = obj.local_bounds();
++            let center = model.transform_point3(if bounds.is_empty() { Vec3::ZERO } else { (bounds.min + bounds.max) * 0.5 });
++            // Level of detail by camera distance; a missing / empty LOD mesh falls back to the base mesh.
++            let uploaded = |m: Option<spark_core::MeshId>| m.map(|m| m.0 as usize).filter(|&m| matches!(self.meshes.get(m), Some(Some(_))));
++            let Some(mesh) = uploaded(obj.mesh_at(center.distance(cam.position))).or_else(|| uploaded(obj.mesh)) else { continue };
++            let Some(Some(gpu_mesh)) = self.meshes.get(mesh) else { continue };
+             let in_view = !outside_frustum(&(view_proj * model), &bounds);
+             let transparent = m.is_transparent();
+             let caster = shadows && m.cast_shadow && !transparent && !outside_frustum(&(light_vp * model), &bounds);
+@@ -1319,19 +1364,23 @@ impl Renderer {
+                 BlendMode::Additive => VARIANT_ADDITIVE,
+                 _ => 0,
+             } | if m.double_sided { VARIANT_DOUBLE_SIDED } else { 0 };
+-            let center = model.transform_point3(if bounds.is_empty() { Vec3::ZERO } else { (bounds.min + bounds.max) * 0.5 });
++            let normal_map = m.normal_map.map(|t| t.0 as usize).filter(|&t| t < self.textures.len());
++            let emissive = m.emissive.to_linear();
+             cands.push(Candidate {
+                 uniform: ObjectUniform {
+                     model: model.to_cols_array_2d(),
+                     normal_matrix: normal_matrix(&model).to_cols_array_2d(),
+                     color: m.color.to_linear(),
+                     data: m.data,
+-                    info: [m.tiling.x, m.tiling.y, flag(m.unlit), 0.0],
++                    info: [m.tiling.x, m.tiling.y, flag(m.unlit), flag(m.pbr)],
++                    pbr: [m.metallic, m.roughness, flag(normal_map.is_some()), 0.0],
++                    emissive: [emissive[0], emissive[1], emissive[2], 0.0],
+                 },
+                 shader: self.asset_shader(m.shader, ShaderKind::Surface).unwrap_or(fallback),
+                 variant,
+                 mesh,
+                 texture: m.texture.map(|t| t.0 as usize).filter(|&t| t < self.textures.len()),
++                normal_map,
+                 depth: -view.transform_point3(center).z,
+                 in_view,
+                 caster,
+@@ -1367,7 +1416,7 @@ impl Renderer {
+         order.sort_by(|&a, &b| {
+             let (a, b) = (&cands[a as usize], &cands[b as usize]);
+             match (transparent(a), transparent(b)) {
+-                (false, false) => (a.variant, a.shader, a.texture, a.mesh).cmp(&(b.variant, b.shader, b.texture, b.mesh)),
++                (false, false) => (a.variant, a.shader, a.texture, a.normal_map, a.mesh).cmp(&(b.variant, b.shader, b.texture, b.normal_map, b.mesh)),
+                 (true, true) => b.depth.total_cmp(&a.depth),
+                 (ta, tb) => ta.cmp(&tb),
+             }
+@@ -1393,7 +1442,8 @@ impl Renderer {
+             let same = list.last().is_some_and(|b: &Batch3| {
+                 (b.count as usize) < MAX_INSTANCES
+                     && b.mesh == c.mesh
+-                    && (shadow_part || (b.shader == c.shader && b.variant == c.variant && b.texture == c.texture))
++                    && (shadow_part
++                        || (b.shader == c.shader && b.variant == c.variant && b.texture == c.texture && b.normal_map == c.normal_map))
+             });
+             if same {
+                 list.last_mut().expect("batch").count += 1; // checked is_some() above
+@@ -1404,6 +1454,7 @@ impl Renderer {
+                     variant: c.variant,
+                     mesh: c.mesh,
+                     texture: c.texture,
++                    normal_map: c.normal_map,
+                     offset: scratch.len() as u32,
+                     count: 1,
+                 });
+@@ -1452,6 +1503,32 @@ impl Renderer {
+             }
+         }
+ 
++        let nearest = rs.filter == TextureFilter::Nearest;
++        for b in &batches {
++            if let Some(normal) = b.normal_map {
++                let key = (b.texture, normal, nearest);
++                if !self.normal_mapped_groups.contains_key(&key) {
++                    let base = b.texture.map_or(&self.white.view, |t| &self.textures[t].view);
++                    let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
++                        label: Some("spark normal-mapped material"),
++                        layout: &self.texture_layout,
++                        entries: &[
++                            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(base) },
++                            wgpu::BindGroupEntry {
++                                binding: 1,
++                                resource: wgpu::BindingResource::Sampler(&self.texture_samplers[if nearest { 0 } else { 1 }]),
++                            },
++                            wgpu::BindGroupEntry {
++                                binding: 2,
++                                resource: wgpu::BindingResource::TextureView(&self.textures[normal].view),
++                            },
++                        ],
++                    });
++                    self.normal_mapped_groups.insert(key, group);
++                }
++            }
++        }
++
+         let target = self.scene_target.as_ref().expect("scene target"); // ensure_scene_target() was called
+         let bg = scene.background.to_linear();
+         {
+@@ -1480,9 +1557,8 @@ impl Renderer {
+                 multiview_mask: None,
+             });
+             pass.set_bind_group(0, &self.frame_bind_group, &[]);
+-            let nearest = rs.filter == TextureFilter::Nearest;
+             let (mut last_pipe, mut last_shader, mut last_mesh, mut last_texture) =
+-                (None, None, usize::MAX, None::<Option<usize>>);
++                (None, None, usize::MAX, None::<(Option<usize>, Option<usize>)>);
+             for b in &batches {
+                 if last_pipe != Some((b.shader, b.variant)) {
+                     pass.set_pipeline(self.pipeline(b.shader, (self.scene_format, b.variant, samples)));
+@@ -1494,10 +1570,16 @@ impl Renderer {
+                 }
+                 pass.set_bind_group(1, &self.object_bind_group, &[b.offset]);
+                 let mesh = self.meshes[b.mesh].as_ref().expect("uploaded mesh"); // candidates filtered to have uploaded meshes
+-                if last_texture != Some(b.texture) {
+-                    let tex = b.texture.map(|t| &self.textures[t]).unwrap_or(&self.white);
+-                    pass.set_bind_group(2, if nearest { &tex.nearest } else { &tex.linear }, &[]);
+-                    last_texture = Some(b.texture);
++                if last_texture != Some((b.texture, b.normal_map)) {
++                    let group = match b.normal_map {
++                        Some(normal) => &self.normal_mapped_groups[&(b.texture, normal, nearest)], // created above
++                        None => {
++                            let tex = b.texture.map(|t| &self.textures[t]).unwrap_or(&self.white);
++                            if nearest { &tex.nearest } else { &tex.linear }
++                        }
++                    };
++                    pass.set_bind_group(2, group, &[]);
++                    last_texture = Some((b.texture, b.normal_map));
+                 }
+                 if last_mesh != b.mesh {
+                     pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+@@ -2138,6 +2220,7 @@ fn upload_texture(
+     queue: &wgpu::Queue,
+     layout: &wgpu::BindGroupLayout,
+     samplers: &[wgpu::Sampler; 4],
++    normal: &wgpu::TextureView,
+     image: &ImageData,
+     format: wgpu::TextureFormat,
+     mipmaps: bool,
+@@ -2166,6 +2249,7 @@ fn upload_texture(
+             entries: &[
+                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
++                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(normal) },
+             ],
+         })
+     };
+@@ -2353,6 +2437,63 @@ mod tests {
+         assert_eq!(r.last_stats().post_passes, 10);
+     }
+ 
++    /// PBR (metal + rough dielectric), normal maps, emissive and mesh LOD render without GPU
++    /// validation errors, with and without MSAA.
++    #[test]
++    fn pbr_normal_map_and_lod_render() {
++        use spark_core::ImageData;
++        let Ok(mut r) = Renderer::new_headless(64, 64) else { return eprintln!("skipping GPU test: no adapter") };
++        let mut world = World::default();
++        world.scene.background = Color::BLACK;
++        let normal = world.assets.add_texture(ImageData::checker(16, 4, Color::rgb(0.5, 0.5, 1.0), Color::rgb(0.7, 0.5, 0.8)));
++        let base = world.assets.add_texture(ImageData::checker(16, 2, Color::WHITE, Color::GRAY));
++        let sphere = world.add_mesh(MeshData::sphere(0.8, 16));
++        let cube = world.add_mesh(MeshData::cube(1.0));
++        let metal = Material::pbr(Color::WHITE, 1.0, 0.2).with_normal_map(Some(normal));
++        let a = world.spawn(sphere, metal);
++        world.scene.get_mut(a).unwrap().position = Vec3::new(-1.0, 0.0, 0.0);
++        let mut plastic = Material::pbr(Color::RED, 0.0, 0.8).with_normal_map(Some(normal));
++        plastic.texture = Some(base);
++        let b = world.spawn(cube, plastic);
++        world.scene.get_mut(b).unwrap().position = Vec3::new(1.0, 0.0, 0.0);
++        let classic = Material::color(Color::GREEN).with_normal_map(Some(normal));
++        let c = world.spawn(cube, classic);
++        world.scene.get_mut(c).unwrap().position = Vec3::new(0.0, 1.0, 0.0);
++        world.scene.camera.position = Vec3::new(0.0, 0.0, 5.0);
++        world.scene.camera.look_at(Vec3::ZERO);
++        let scope = r.device.push_error_scope(wgpu::ErrorFilter::Validation);
++        for samples in [4, 1] {
++            world.render.msaa = samples;
++            r.screenshot(&world).expect("screenshot");
++        }
++        let error = pollster::block_on(scope.pop());
++        assert!(error.is_none(), "GPU validation error: {error:?}");
++    }
++
++    /// Emissive light shows on a black surface in the dark; past its LOD distance an object
++    /// draws its LOD mesh instead (here a small cube that leaves the edge pixels empty).
++    #[test]
++    fn emissive_and_lod_switch() {
++        let Ok(mut r) = Renderer::new_headless(64, 64) else { return eprintln!("skipping GPU test: no adapter") };
++        let mut world = World::default();
++        world.scene.background = Color::BLACK;
++        world.scene.ambient = Color::BLACK;
++        world.scene.sun.intensity = 0.0;
++        let big = world.add_mesh(MeshData::cube(2.0));
++        let tiny = world.add_mesh(MeshData::cube(0.5));
++        let id = world.spawn(big, Material::pbr(Color::BLACK, 0.0, 1.0).with_emissive(Color::rgb(1.0, 0.0, 0.0)));
++        world.scene.camera.position = Vec3::new(0.0, 0.0, 4.0);
++        world.scene.camera.look_at(Vec3::ZERO);
++        let image = r.screenshot(&world).expect("screenshot");
++        let (center, edge) = (image.pixel(32, 32), image.pixel(20, 32));
++        assert!(center[0] > 200 && center[1] < 40, "emissive not drawn: {center:?}");
++        assert!(edge[0] > 200, "full mesh covers the edge: {edge:?}");
++        world.scene.get_mut(id).unwrap().lod = vec![(3.0, tiny)];
++        let image = r.screenshot(&world).expect("screenshot");
++        assert!(image.pixel(32, 32)[0] > 200, "LOD mesh drawn");
++        assert!(image.pixel(20, 32)[0] < 30, "LOD mesh replaces the full mesh: {:?}", image.pixel(20, 32));
++    }
++
+     /// Values above 1 reach the tonemapper: Reinhard x / (1 + x) stays above 0.5 (sRGB 188) only
+     /// if the scene kept x > 1; an 8-bit scene clips to 1.0 first and gives exactly ~188.
+     #[test]
+diff --git a/crates/spark-script/src/api.rs b/crates/spark-script/src/api.rs
+index b180c72..cf14314 100644
+--- a/crates/spark-script/src/api.rs
++++ b/crates/spark-script/src/api.rs
+@@ -259,6 +259,13 @@ fn install_assets(lua: &Lua, g: &Table) -> LuaResult<()> {
+     let material = lua.create_table()?;
+     material.set("color", lua.create_function(|_, c: Value| Ok(LuaMaterial(Material::color(to_color(&c, "Material.color")?))))?)?;
+     material.set("unlit", lua.create_function(|_, c: Value| Ok(LuaMaterial(Material::unlit(to_color(&c, "Material.unlit")?))))?)?;
++    material.set(
++        "pbr",
++        lua.create_function(|_, (c, metallic, roughness): (Value, Option<f32>, Option<f32>)| {
++            let c = if c.is_nil() { Color::WHITE } else { to_color(&c, "Material.pbr")? };
++            Ok(LuaMaterial(Material::pbr(c, metallic.unwrap_or(0.0), roughness.unwrap_or(0.5))))
++        })?,
++    )?;
+     material.set(
+         "texture",
+         lua.create_function(|lua, (t, c): (Value, Value)| {
+diff --git a/crates/spark-script/src/types.rs b/crates/spark-script/src/types.rs
+index 54e85fd..8f9800b 100644
+--- a/crates/spark-script/src/types.rs
++++ b/crates/spark-script/src/types.rs
+@@ -37,7 +37,50 @@ pub(crate) fn set_parent(w: &mut World, id: ObjectId, parent: Option<ObjectId>)
+ }
+ 
+ const PROPS: &str =
+-    "name, position, rotation, scale, visible, parent, color, shader, data, body, light, blend, double_sided, cast_shadow";
++    "name, position, rotation, scale, visible, parent, color, shader, data, body, light, blend, double_sided, cast_shadow, pbr, metallic, roughness, emissive, normal_map, lod";
++
++/// `nil` / `false` -> none, else a Texture or an image path.
++fn to_normal_map(w: &mut World, v: &Value, what: &str) -> LuaResult<Option<TextureId>> {
++    match v {
++        Value::Nil | Value::Boolean(false) => Ok(None),
++        _ => crate::draw::texture_of(w, v, what).map(Some),
++    }
++}
++
++/// `{ {distance, mesh}, ... }` -> LOD levels.
++fn to_lod(v: &Value, what: &str) -> LuaResult<Vec<(f32, MeshId)>> {
++    let bad = || rt(format!("{what}: expected a list of {{distance, Mesh}} pairs, e.g. {{ {{20, mid}}, {{60, low}} }}"));
++    let t = match v {
++        Value::Nil => return Ok(Vec::new()),
++        Value::Table(t) => t,
++        _ => return Err(bad()),
++    };
++    let mut out = Vec::new();
++    for level in t.sequence_values::<Value>() {
++        let Value::Table(pair) = level? else { return Err(bad()) };
++        let d: Value = pair.get(1)?;
++        let m: Value = pair.get(2)?;
++        let d = to_num(&d, what)?;
++        let Value::UserData(ud) = m else { return Err(bad()) };
++        let mesh = ud.borrow::<LuaMesh>().map_err(|_| bad())?.0;
++        if !(d >= 0.0) {
++            return Err(rt(format!("{what}: distances must be 0 or more, got {d}")));
++        }
++        out.push((d, mesh));
++    }
++    Ok(out)
++}
++
++fn lod_table(lua: &Lua, lod: &[(f32, MeshId)]) -> LuaResult<Table> {
++    let t = lua.create_table()?;
++    for (d, m) in lod {
++        let pair = lua.create_table()?;
++        pair.push(*d)?;
++        pair.push(LuaMesh(*m))?;
++        t.push(pair)?;
++    }
++    Ok(t)
++}
+ 
+ /// `material.data`: up to 4 numbers, a vector or {x, y, z, w}.
+ pub(crate) fn to_data(args: &[Value], what: &str) -> LuaResult<[f32; 4]> {
+@@ -91,6 +134,11 @@ pub(crate) fn apply_props(w: &mut World, id: ObjectId, props: Option<Table>) ->
+         match k.as_str() {
+             // set_parent needs &mut World, so handle it before borrowing the object.
+             "parent" => set_parent(w, id, to_parent(&v, &what)?)?,
++            // may load a texture: needs the whole world too
++            "normal_map" => {
++                let t = to_normal_map(w, &v, &what)?;
++                w.scene.get_mut(id).ok_or_else(dead)?.material.normal_map = t;
++            }
+             _ => {
+                 let o = w.scene.get_mut(id).ok_or_else(dead)?;
+                 match k.as_str() {
+@@ -105,6 +153,11 @@ pub(crate) fn apply_props(w: &mut World, id: ObjectId, props: Option<Table>) ->
+                     "blend" => o.material.blend = to_blend(&v, &what)?,
+                     "double_sided" => o.material.double_sided = to_bool(&v, &what)?,
+                     "cast_shadow" => o.material.cast_shadow = to_bool(&v, &what)?,
++                    "pbr" => o.material.pbr = to_bool(&v, &what)?,
++                    "metallic" => o.material = o.material.with_metallic(to_num(&v, &what)?),
++                    "roughness" => o.material = o.material.with_roughness(to_num(&v, &what)?),
++                    "emissive" => o.material.emissive = to_color(&v, &what)?,
++                    "lod" => o.lod = to_lod(&v, &what)?,
+                     "body" => o.body = Some(crate::physics::to_body(&v, &what)?),
+                     "light" => o.light = Some(crate::light::to_light(&v, &what)?),
+                     _ => return Err(rt(format!("unknown property '{k}' (allowed: {PROPS})"))),
+@@ -161,6 +214,34 @@ impl UserData for Obj {
+         f.add_field_method_set("double_sided", |lua, this, v: bool| write(lua, this.0, |o| o.material.double_sided = v));
+         f.add_field_method_get("cast_shadow", |lua, this| read(lua, this.0, |_, o| o.material.cast_shadow));
+         f.add_field_method_set("cast_shadow", |lua, this, v: bool| write(lua, this.0, |o| o.material.cast_shadow = v));
++        f.add_field_method_get("pbr", |lua, this| read(lua, this.0, |_, o| o.material.pbr));
++        f.add_field_method_set("pbr", |lua, this, v: bool| write(lua, this.0, |o| o.material.pbr = v));
++        f.add_field_method_get("metallic", |lua, this| read(lua, this.0, |_, o| o.material.metallic));
++        f.add_field_method_set("metallic", |lua, this, v: f32| write(lua, this.0, |o| o.material = o.material.with_metallic(v)));
++        f.add_field_method_get("roughness", |lua, this| read(lua, this.0, |_, o| o.material.roughness));
++        f.add_field_method_set("roughness", |lua, this, v: f32| write(lua, this.0, |o| o.material = o.material.with_roughness(v)));
++        f.add_field_method_get("emissive", |lua, this| read(lua, this.0, |_, o| LuaColor(o.material.emissive)));
++        f.add_field_method_set("emissive", |lua, this, v: Value| {
++            let c = to_color(&v, "emissive")?;
++            write(lua, this.0, |o| o.material.emissive = c)
++        });
++        f.add_field_method_get("normal_map", |lua, this| read(lua, this.0, |_, o| o.material.normal_map.map(LuaTexture)));
++        f.add_field_method_set("normal_map", |lua, this, v: Value| {
++            let id = this.0;
++            with(lua, |w| {
++                let t = to_normal_map(w, &v, "normal_map")?;
++                w.scene.get_mut(id).ok_or_else(dead)?.material.normal_map = t;
++                Ok(())
++            })
++        });
++        f.add_field_method_get("lod", |lua, this| {
++            let lod = read(lua, this.0, |_, o| o.lod.clone())?;
++            lod_table(lua, &lod)
++        });
++        f.add_field_method_set("lod", |lua, this, v: Value| {
++            let lod = to_lod(&v, "lod")?;
++            write(lua, this.0, |o| o.lod = lod)
++        });
+         f.add_field_method_get("shader", |lua, this| read(lua, this.0, |_, o| o.material.shader.map(crate::shader::LuaShader)));
+         f.add_field_method_set("shader", |lua, this, v: Value| {
+             let s = crate::shader::to_shader(&v, "shader")?;
+@@ -337,6 +418,11 @@ impl UserData for LuaMaterial {
+         f.add_field_method_get("blend", |_, this| Ok(this.0.blend.name()));
+         f.add_field_method_get("double_sided", |_, this| Ok(this.0.double_sided));
+         f.add_field_method_get("cast_shadow", |_, this| Ok(this.0.cast_shadow));
++        f.add_field_method_get("pbr", |_, this| Ok(this.0.pbr));
++        f.add_field_method_get("metallic", |_, this| Ok(this.0.metallic));
++        f.add_field_method_get("roughness", |_, this| Ok(this.0.roughness));
++        f.add_field_method_get("emissive", |_, this| Ok(LuaColor(this.0.emissive)));
++        f.add_field_method_get("normal_map", |_, this| Ok(this.0.normal_map.map(LuaTexture)));
+     }
+     fn add_methods<M: UserDataMethods<Self>>(m: &mut M) {
+         m.add_method("tiling", |_, this, (x, y): (f32, Option<f32>)| Ok(LuaMaterial(this.0.with_tiling(x, y.unwrap_or(x)))));
+@@ -351,6 +437,13 @@ impl UserData for LuaMaterial {
+             Ok(LuaMaterial(m))
+         });
+         m.add_method("with_unlit", |_, this, on: Option<bool>| Ok(LuaMaterial(this.0.with_unlit(on.unwrap_or(true)))));
++        m.add_method("with_metallic", |_, this, v: f32| Ok(LuaMaterial(this.0.with_metallic(v))));
++        m.add_method("with_roughness", |_, this, v: f32| Ok(LuaMaterial(this.0.with_roughness(v))));
++        m.add_method("with_emissive", |_, this, c: Value| Ok(LuaMaterial(this.0.with_emissive(to_color(&c, "with_emissive")?))));
++        m.add_method("with_normal_map", |lua, this, v: Value| {
++            let t = with(lua, |w| to_normal_map(w, &v, "with_normal_map"))?;
++            Ok(LuaMaterial(this.0.with_normal_map(t)))
++        });
+         m.add_method("with_shader", |_, this, s: Value| {
+             Ok(LuaMaterial(this.0.with_shader(crate::shader::to_shader(&s, "with_shader")?)))
+         });
+diff --git a/crates/spark-script/tests/flow.rs b/crates/spark-script/tests/flow.rs
+index aef5c8c..82c2bfb 100644
+--- a/crates/spark-script/tests/flow.rs
++++ b/crates/spark-script/tests/flow.rs
+@@ -36,6 +36,11 @@ fn draw_contract() {
+     run_script("draw.luau", 100);
+ }
+ 
++#[test]
++fn pbr_contract() {
++    run_script("pbr.luau", 10);
++}
++
+ #[test]
+ fn models_contract() {
+     run_script("models.luau", 2000);
+diff --git a/crates/spark-script/tests/scripts/pbr.luau b/crates/spark-script/tests/scripts/pbr.luau
+new file mode 100644
+index 0000000..3defef6
+--- /dev/null
++++ b/crates/spark-script/tests/scripts/pbr.luau
+@@ -0,0 +1,41 @@
++-- PBR materials, emissive, normal maps and mesh LOD: properties, builders, argument errors.
++local nm = Texture.solid("#8080ff")
++
++local m = Material.pbr("#c0c0c0", 1, 0.2)
++assert(m.pbr and m.metallic == 1, "Material.pbr sets the fields")
++assert(math.abs(m.roughness - 0.2) < 1e-6)
++assert(Material.pbr().metallic == 0 and Material.pbr().roughness == 0.5, "defaults: dielectric, roughness 0.5")
++assert(Material.pbr("white", 5, -1).metallic == 1 and Material.pbr("white", 5, -1).roughness == 0, "values are clamped")
++local c = Material.color("red")
++assert(not c.pbr, "classic materials stay classic")
++assert(c:with_roughness(0.5).pbr, "with_roughness turns PBR on")
++assert(not c:with_emissive("#ff8000").pbr, "emissive works without PBR")
++assert(c:with_normal_map(nm).normal_map ~= nil)
++assert(c:with_normal_map(nm):with_normal_map(nil).normal_map == nil, "nil removes the normal map")
++
++local high, low = Mesh.sphere(), Mesh.cube()
++local o = spawn(high, "white", {
++    pbr = true, metallic = 0.5, roughness = 0.3, emissive = "#202020", normal_map = nm,
++    lod = { { 30, low } },
++})
++assert(o.pbr and o.metallic == 0.5 and o.normal_map ~= nil)
++assert(o.emissive ~= nil)
++assert(#o.lod == 1 and o.lod[1][1] == 30, "lod reads back")
++o.roughness = 2
++assert(o.roughness == 1, "property setter clamps")
++o.normal_map = false
++assert(o.normal_map == nil)
++o.lod = {}
++assert(#o.lod == 0)
++o.pbr = false
++assert(not o.pbr)
++
++assert(not pcall(function() o.lod = { 30, low } end), "lod needs {distance, Mesh} pairs")
++assert(not pcall(function() o.lod = { { -1, low } } end), "negative distance is rejected")
++assert(not pcall(function() o.lod = { { 10, "cube" } } end), "lod needs a Mesh")
++assert(not pcall(function() o.normal_map = 5 end), "normal_map needs a texture")
++assert(not pcall(spawn, low, "white", { metalic = 1 }), "typos are reported")
++
++function update()
++    quit()
++end
+diff --git a/docs/LUAU_API.md b/docs/LUAU_API.md
+index d9ca6e1..8bf73ed 100644
+--- a/docs/LUAU_API.md
++++ b/docs/LUAU_API.md
+@@ -280,6 +280,12 @@ Primitives are centered at the origin (a cube of size 1 spans -0.5..0.5). Same p
+ | `mat:with_blend("alpha")` | `"auto"` (default: alpha when color alpha < 1), `"opaque"`, `"alpha"` (glass, water, fades), `"additive"` (fire, glow) |
+ | `mat:with_double_sided(true)`, `mat:with_cast_shadow(false)` | draw back faces (leaves, flags); no sun shadow |
+ | `mat.blend`, `mat.double_sided`, `mat.cast_shadow` | read; objects also have `obj.blend`, `obj.double_sided`, `obj.cast_shadow` (read/write, also `spawn` props) |
++| `Material.pbr(c="white", metallic=0, roughness=0.5)` | physically based (Cook-Torrance GGX): metals reflect the ambient light and have tinted highlights |
++| `mat:with_metallic(m)`, `mat:with_roughness(r)` | 0..1 (clamped); either one turns PBR shading on |
++| `mat:with_emissive(c)` | light the surface gives off by itself (screens, lava, lamps); works in every mode, pairs well with bloom |
++| `mat:with_normal_map(tex_or_path)` | tangent-space normal map (OpenGL convention, green = up); `nil` removes it; works with and without PBR |
++| `mat.pbr`, `mat.metallic`, `mat.roughness`, `mat.emissive`, `mat.normal_map` | read; objects have the same names (read/write, also `spawn` props); setting `obj.metallic` / `obj.roughness` turns PBR on |
++| `obj.lod = { {20, mid}, {60, low} }` | level of detail: from 20 m away draw `mid`, from 60 m `low` (also a `spawn` prop; `{}` = off) |
+ | `Color.rgb(r,g,b)`, `Color.rgba(r,g,b,a)`, `Color.hex("#ff8800")`, `Color.lerp(a,b,t)` | |
+ | `Color.RED`, `Color.SKY`, ... | uppercase names of the color list above |
+ | `color.r .g .b .a`, `color:lerp(c, t)`, `color:with_alpha(a)` | |
+@@ -328,9 +334,10 @@ spawn(Mesh.box(0.1, 0.1, 0.6), "gray", { parent = hero:find("hand.R") })   -- sw
+ 
+ - Formats: `.glb` (recommended) and `.gltf` (+ .bin / images next to it). Export from Blender: File > Export > glTF 2.0,
+   "+Y up", forward = -Z for Spark (models face -Z like every Spark object; `obj:look_at` turns -Z to the target).
+-- Supported: meshes (triangles), node hierarchy, base color factor + base color texture, `KHR_materials_unlit`,
++- Supported: meshes (triangles), node hierarchy, base color factor + base color texture, normal map, emissive
++  factor, metallic / roughness factors (used once you set `pbr = true` on its objects), `KHR_materials_unlit`,
+   skins (up to 4 bones per vertex, CPU skinning), animations of translation / rotation / scale (step, linear, cubic).
+-  Not (yet): morph targets, PBR maps (normal / metal-rough are ignored), cameras / lights in the file.
++  Not (yet): morph targets, metal-rough / emissive / occlusion textures, cameras / lights in the file.
+ - `Model.load(path)` -> Model (cached by path). `model.name`, `model.animations` (list of clip names), `model.size`
+   (bind-pose size vector), `model:duration(name)`.
+ - `spawn(model_or_path, material?, props?)` -> root Object (empty, named after the file); every glTF node becomes a
+diff --git a/docs/SHADERS.md b/docs/SHADERS.md
+index a56efb3..ddecac3 100644
+--- a/docs/SHADERS.md
++++ b/docs/SHADERS.md
+@@ -80,8 +80,10 @@ struct Fragment {
+     custom: vec4<f32>,     // free: pass anything from vertex to fragment
+     spark_instance: u32,   // engine-managed (instanced drawing): leave it alone
+ }
+-object.model, object.normal_matrix, object.color (linear), object.data, object.info (tiling x, tiling y, unlit 0/1)
++object.model, object.normal_matrix, object.color (linear), object.data, object.info (tiling x, tiling y, unlit 0/1, pbr 0/1)
++object.pbr (metallic, roughness, has normal map 0/1, -), object.emissive (linear rgb)
+ base_texture, base_sampler                 // material texture (white if none), sampled with graphics.filter
++normal_texture                             // material normal map (flat if none), sampled with base_sampler
+ // `object` is the object being drawn. Objects with the same mesh / material state are drawn in one
+ // instanced draw call; that is invisible to shaders (always use `default_vertex` or start from
+ // `var f: Fragment;` / `var f = default_vertex(v);` and return `f`, the engine fills spark_instance).
+@@ -92,6 +94,8 @@ base_texture, base_sampler                 // material texture (white if none),
+ default_vertex(v) -> Fragment
+ surface_color(uv) -> vec4<f32>             // object.color * base texture
+ lighting(world_pos, normal) -> vec3<f32>   // ambient + sun (with shadows) + lights
++surface_normal(world_pos, normal, uv) -> vec3<f32>  // normal with the material normal map applied (normalized)
++pbr_lighting(world_pos, normal, base_rgb, metallic, roughness) -> vec3<f32>  // PBR version of base * lighting()
+ sun_shadow(world_pos, normal) -> f32       // 1 = lit, 0 = in the sun's shadow (PCF); 1 when shadows are off
+ apply_fog(rgb, world_pos) -> vec3<f32>
+ default_fragment(f) -> vec4<f32>
+diff --git a/docs/spark.d.luau b/docs/spark.d.luau
+index 0fb962c..ab5a056 100644
+--- a/docs/spark.d.luau
++++ b/docs/spark.d.luau
+@@ -97,8 +97,17 @@ type SpawnProps = {
+     blend: BlendMode?,
+     double_sided: boolean?,
+     cast_shadow: boolean?,
++    pbr: boolean?,
++    metallic: number?,
++    roughness: number?,
++    emissive: ColorLike?,
++    normal_map: (Texture | string | false)?,
++    lod: { LodLevel }?,
+ }
+ 
++-- `{distance, mesh}`: from `distance` meters away the object draws `mesh`.
++type LodLevel = { number | Mesh }
++
+ type Hit = { object: Object, point: vector, normal: vector, distance: number }
+ type CollisionInfo = { speed: number, sensor: boolean }
+ type ListenerOptions = { priority: number?, owner: Object?, once: boolean? }
+@@ -160,6 +169,15 @@ declare extern type Material with
+     blend: BlendMode
+     double_sided: boolean
+     cast_shadow: boolean
++    pbr: boolean
++    metallic: number
++    roughness: number
++    emissive: Color
++    normal_map: Texture?
++    function with_metallic(self, metallic: number): Material
++    function with_roughness(self, roughness: number): Material
++    function with_emissive(self, color: ColorLike): Material
++    function with_normal_map(self, texture: (Texture | string)?): Material
+     function with_shader(self, shader: Shader?): Material
+     function with_data(self, a: number, b: number?, c: number?, d: number?): Material
+ end
+@@ -252,6 +270,12 @@ declare extern type Object with
+     blend: BlendMode
+     double_sided: boolean
+     cast_shadow: boolean
++    pbr: boolean
++    metallic: number
++    roughness: number
++    emissive: Color
++    normal_map: Texture?
++    lod: { LodLevel }
+     color: Color
+     material: Material?
+     mesh: Mesh?
+@@ -365,6 +389,7 @@ declare Material: {
+     unlit: (color: ColorLike) -> Material,
+     texture: (texture: Texture | string, tint: ColorLike?) -> Material,
+     checker: (a: ColorLike, b: ColorLike, repeats: number?) -> Material,
++    pbr: (color: ColorLike?, metallic: number?, roughness: number?) -> Material,
+ }
+ 
+ declare Color: {

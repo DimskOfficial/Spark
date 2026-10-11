@@ -1,0 +1,863 @@
+diff --git a/README.md b/README.md
+index 9e8aa1c..1436c8c 100644
+--- a/README.md
++++ b/README.md
+@@ -56,7 +56,7 @@ Spark does not try to compete with Unity, Unreal or Godot. It has a different jo
+ | Module | What you get |
+ |---|---|
+ | **Render** | wgpu (Vulkan / DirectX 12 / Metal / OpenGL fallback). 3D meshes and primitives, glTF 2.0 models with skins and animations, sun / point / spot lights, fog, HDR scene, built-in post effects (bloom, tonemapping, SSAO, depth of field, motion blur, color grading, FXAA, vignette, film grain, chromatic aberration; all off by default), your own WGSL surface and full-screen post shaders with hot reload ([docs/SHADERS.md](docs/SHADERS.md)), low internal resolution for weak PCs |
+-| **2D** | immediate-mode drawing: sprites and sprite sheets, text with any TTF/OTF font, shapes, transforms, UI and in-scene layers |
++| **2D** | immediate-mode drawing: sprites and sprite sheets, text with any TTF/OTF font, shapes, transforms, UI and in-scene layers, immediate-mode UI widgets (buttons, sliders, checkboxes, panels, progress bars) |
+ | **Script** | Luau runtime with hot reload, modules (`require`), timers, coroutine tasks with `wait`, tweens |
+ | **Input** | full keyboard (punctuation, numpad, F1-F24), text input with IME, key repeat, mouse with side buttons and FPS mouse lock, gamepads with hot-plug |
+ | **Audio** | wav / ogg / mp3 / flac, 3D positional sound, fades, mixer buses (music / sfx / ui ...), layered music |
+diff --git a/README.ru.md b/README.ru.md
+index 4883235..8e3ad80 100644
+--- a/README.ru.md
++++ b/README.ru.md
+@@ -58,7 +58,7 @@ SPARK не пытается тягаться с Unity, Unreal Engine или Godo
+ | Модуль | Что умеет |
+ |---|---|
+ | **Render** | wgpu (Vulkan / DirectX 12 / Metal / запасной OpenGL). 3D-меши и примитивы, модели glTF 2.0 со скелетом и анимациями, солнце / точечные и прожекторные источники света, туман, HDR-сцена, встроенные пост-эффекты (bloom, тонмаппинг, SSAO, глубина резкости, motion blur, цветокоррекция, FXAA, виньетка, зерно, хроматическая аберрация; по умолчанию выключены), свои WGSL-шейдеры поверхностей и пост-процессинга с горячей перезагрузкой ([docs/SHADERS.md](docs/SHADERS.md)), низкое внутреннее разрешение для слабых ПК |
+-| **2D** | immediate-mode отрисовка: спрайты и спрайт-листы, текст любым TTF/OTF-шрифтом, фигуры, трансформации, слои UI и сцены |
++| **2D** | immediate-mode отрисовка: спрайты и спрайт-листы, текст любым TTF/OTF-шрифтом, фигуры, трансформации, слои UI и сцены, immediate-mode UI-виджеты (кнопки, слайдеры, чекбоксы, панели, прогресс-бары) |
+ | **Script** | рантайм Luau с горячей перезагрузкой, модули (`require`), таймеры, задачи-корутины с `wait`, твины |
+ | **Input** | полная клавиатура (пунктуация, numpad, F1-F24), ввод текста с IME, автоповтор, мышь с боковыми кнопками и захватом для FPS, геймпады с горячим подключением |
+ | **Audio** | wav / ogg / mp3 / flac, 3D-звук, фейды, шины микширования (music / sfx / ui ...), многослойная музыка |
+diff --git a/crates/spark-core/src/canvas.rs b/crates/spark-core/src/canvas.rs
+index 65d9540..95e18a7 100644
+--- a/crates/spark-core/src/canvas.rs
++++ b/crates/spark-core/src/canvas.rs
+@@ -284,6 +284,11 @@ impl Canvas {
+         self.transform
+     }
+ 
++    /// Replaces the current transform (the push / pop stack is unchanged).
++    pub fn set_transform(&mut self, t: Affine2) {
++        self.transform = t;
++    }
++
+     pub fn push(&mut self) {
+         self.stack.push(self.transform);
+     }
+diff --git a/crates/spark-core/src/game.rs b/crates/spark-core/src/game.rs
+index f807a5a..fdcfb1e 100644
+--- a/crates/spark-core/src/game.rs
++++ b/crates/spark-core/src/game.rs
+@@ -52,10 +52,12 @@ pub fn run_frame<G: Game + ?Sized>(game: &mut G, world: &mut World, real_dt: f32
+         world.input.end_fixed_steps();
+     }
+     let dt = world.time.dt;
++    world.ui.begin(&world.canvas, &world.input);
+     game.update(world, dt);
+     crate::animation::update(world, dt);
+     game.late_update(world, dt);
+     game.draw(world);
++    world.ui.end();
+     world.input.end_frame();
+     crate::audio::flush(world);
+ }
+diff --git a/crates/spark-core/src/lib.rs b/crates/spark-core/src/lib.rs
+index 6285f16..733a099 100644
+--- a/crates/spark-core/src/lib.rs
++++ b/crates/spark-core/src/lib.rs
+@@ -29,6 +29,7 @@ pub mod schedule;
+ pub mod shader;
+ pub mod text;
+ pub mod time;
++pub mod ui;
+ pub mod vfs;
+ pub mod world;
+ 
+@@ -56,6 +57,7 @@ pub use scene::{Fog, Light, LightKind, Object, ObjectId, Scene, Sun};
+ pub use schedule::{Scheduler, TimerId};
+ pub use shader::{Param, ParamType, ShaderData, ShaderId, ShaderKind};
+ pub use text::{FontId, Fonts};
++pub use ui::{Rect, Ui, UiStyle};
+ pub use time::Time;
+ pub use world::{WindowSettings, World};
+ 
+diff --git a/crates/spark-core/src/ui.rs b/crates/spark-core/src/ui.rs
+new file mode 100644
+index 0000000..115749a
+--- /dev/null
++++ b/crates/spark-core/src/ui.rs
+@@ -0,0 +1,493 @@
++//! Immediate-mode UI: panels, buttons, labels, images, sliders, checkboxes and progress bars.
++//!
++//! Widgets are drawn through the [`Canvas`] on [`Layer::Ui`] in virtual pixels (origin top-left,
++//! Y down) and return their interaction result right away:
++//!
++//! ```ignore
++//! if world.ui.button(&mut world.canvas, 1, Rect::new(10.0, 10.0, 200.0, 40.0), "Start") {
++//!     // clicked this frame
++//! }
++//! ```
++//!
++//! The frame runner calls [`Ui::begin`] before `update` and [`Ui::end`] after `draw`, so widgets
++//! work in both. Interactive widgets need an `id` that stays the same from frame to frame (a press
++//! and the release that completes a click happen in different frames).
++
++use glam::{Affine2, Vec2};
++
++use crate::assets::TextureId;
++use crate::canvas::{Align, Canvas, Layer, SpriteParams, TextParams};
++use crate::color::Color;
++use crate::input::{Input, MouseButton};
++
++/// Rectangle in virtual pixels (origin top-left, Y down).
++#[derive(Clone, Copy, Debug, Default, PartialEq)]
++pub struct Rect {
++    pub x: f32,
++    pub y: f32,
++    pub w: f32,
++    pub h: f32,
++}
++
++impl Rect {
++    pub fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
++        Self { x, y, w, h }
++    }
++
++    /// True if `p` is inside the rectangle (edges included).
++    pub fn contains(&self, p: Vec2) -> bool {
++        p.x >= self.x && p.x <= self.x + self.w && p.y >= self.y && p.y <= self.y + self.h
++    }
++
++    pub fn center(&self) -> Vec2 {
++        Vec2::new(self.x + self.w * 0.5, self.y + self.h * 0.5)
++    }
++
++    fn pos(&self) -> Vec2 {
++        Vec2::new(self.x, self.y)
++    }
++
++    fn size(&self) -> Vec2 {
++        Vec2::new(self.w, self.h)
++    }
++}
++
++/// Colors of the built-in widgets.
++#[derive(Clone, Debug, PartialEq)]
++pub struct UiStyle {
++    pub panel: Color,
++    pub widget: Color,
++    pub widget_hover: Color,
++    pub widget_pressed: Color,
++    pub border: Color,
++    pub track: Color,
++    pub fill: Color,
++    pub fill_hover: Color,
++    pub check: Color,
++    pub text: Color,
++    /// Largest text size of button labels (smaller buttons get smaller text).
++    pub button_text_size: f32,
++}
++
++impl Default for UiStyle {
++    fn default() -> Self {
++        Self {
++            panel: Color::rgba(0.1, 0.1, 0.12, 0.9),
++            widget: Color::rgb(0.25, 0.27, 0.33),
++            widget_hover: Color::rgb(0.36, 0.38, 0.43),
++            widget_pressed: Color::rgb(0.18, 0.19, 0.23),
++            border: Color::rgb(0.12, 0.12, 0.15),
++            track: Color::rgb(0.15, 0.15, 0.18),
++            fill: Color::rgb(0.25, 0.45, 0.85),
++            fill_hover: Color::rgb(0.35, 0.55, 0.95),
++            check: Color::rgb(0.35, 0.8, 0.45),
++            text: Color::WHITE,
++            button_text_size: 18.0,
++        }
++    }
++}
++
++/// Immediate-mode UI state, kept across frames in [`crate::World::ui`].
++#[derive(Clone, Debug, Default)]
++pub struct Ui {
++    /// Widget under the mouse cursor this frame.
++    pub hot: Option<u64>,
++    /// Widget being pressed or dragged (left mouse button held since the press on it).
++    pub active: Option<u64>,
++    /// Widget colors.
++    pub style: UiStyle,
++    /// Mouse position in virtual pixels.
++    pub mouse_pos: Vec2,
++    /// Left mouse button held.
++    pub mouse_down: bool,
++    /// Left mouse button pressed this frame.
++    pub mouse_pressed: bool,
++    /// Canvas size in virtual pixels.
++    pub screen_size: Vec2,
++    /// The cursor is over a widget or panel drawn this frame / the previous frame.
++    over: bool,
++    over_prev: bool,
++}
++
++/// Puts the canvas on the UI layer without a transform for the widget and restores it afterwards,
++/// so widgets never change where the game's own `draw` calls go.
++fn on_ui_layer<R>(canvas: &mut Canvas, f: impl FnOnce(&mut Canvas) -> R) -> R {
++    let (layer, transform) = (canvas.layer(), canvas.transform());
++    canvas.set_layer(Layer::Ui);
++    canvas.set_transform(Affine2::IDENTITY);
++    let r = f(canvas);
++    canvas.set_layer(layer);
++    canvas.set_transform(transform);
++    r
++}
++
++impl Ui {
++    pub fn new() -> Self {
++        Self::default()
++    }
++
++    /// Takes the mouse state for this frame. Called by the frame runner before `update`.
++    pub fn begin(&mut self, canvas: &Canvas, input: &Input) {
++        self.screen_size = canvas.size();
++        self.mouse_pos = canvas.to_virtual(input.mouse_position);
++        self.mouse_down = input.mouse_down(MouseButton::Left);
++        self.mouse_pressed = input.mouse_pressed(MouseButton::Left);
++        self.hot = None;
++        self.over_prev = self.over;
++        self.over = false;
++    }
++
++    /// Ends the frame. Called by the frame runner after `draw`. Releases the active widget when
++    /// the mouse button is up, even if that widget was not drawn this frame.
++    pub fn end(&mut self) {
++        if !self.mouse_down {
++            self.active = None;
++        }
++        self.mouse_pressed = false;
++    }
++
++    /// True when the cursor is over UI drawn this frame or the previous one: lets the game ignore
++    /// clicks meant for the UI (e.g. `if input.mouse_pressed("left") and not ui.hovered() then shoot() end`).
++    pub fn hovered(&self) -> bool {
++        self.over || self.over_prev
++    }
++
++    fn hover(&mut self, id: Option<u64>, rect: Rect) -> bool {
++        let hovered = rect.contains(self.mouse_pos);
++        if hovered {
++            self.over = true;
++            if id.is_some() {
++                self.hot = id;
++            }
++        }
++        hovered
++    }
++
++    /// Press on the widget makes it active; returns true on the release that ends that press
++    /// while the cursor is still over the widget (a click).
++    fn click(&mut self, id: u64, hovered: bool) -> bool {
++        if self.mouse_pressed && hovered && self.active.is_none() {
++            self.active = Some(id);
++            false
++        } else if !self.mouse_down && self.active == Some(id) {
++            self.active = None;
++            hovered
++        } else {
++            false
++        }
++    }
++
++    // ---- widgets ------------------------------------------------------------------------------
++
++    /// Filled rectangle with an optional border `(thickness, color)`. Returns true when hovered.
++    pub fn panel(&mut self, canvas: &mut Canvas, rect: Rect, bg: Color, border: Option<(f32, Color)>) -> bool {
++        on_ui_layer(canvas, |c| {
++            c.rect(rect.pos(), rect.size(), bg, Align::TOP_LEFT);
++            if let Some((thickness, color)) = border {
++                c.rect_line(rect.pos(), rect.size(), thickness, color, Align::TOP_LEFT);
++            }
++        });
++        self.hover(None, rect)
++    }
++
++    /// Button with a centered label. Returns true when clicked (pressed and released over it).
++    pub fn button(&mut self, canvas: &mut Canvas, id: u64, rect: Rect, text: &str) -> bool {
++        let hovered = self.hover(Some(id), rect);
++        let clicked = self.click(id, hovered);
++        let s = &self.style;
++        let color = if self.active == Some(id) {
++            s.widget_pressed
++        } else if hovered {
++            s.widget_hover
++        } else {
++            s.widget
++        };
++        let text_params = TextParams {
++            size: s.button_text_size.min(rect.h * 0.6).max(1.0),
++            color: s.text,
++            align: Align::CENTER,
++            ..Default::default()
++        };
++        let border = s.border;
++        on_ui_layer(canvas, |c| {
++            c.rect(rect.pos(), rect.size(), color, Align::TOP_LEFT);
++            c.rect_line(rect.pos(), rect.size(), 1.0, border, Align::TOP_LEFT);
++            c.text(text, rect.center(), &text_params);
++        });
++        clicked
++    }
++
++    /// Text with its top-left corner at `pos`.
++    pub fn label(&mut self, canvas: &mut Canvas, pos: Vec2, text: &str, size: f32, color: Color) {
++        let p = TextParams { size, color, align: Align::TOP_LEFT, ..Default::default() };
++        on_ui_layer(canvas, |c| {
++            c.text(text, pos, &p);
++        });
++    }
++
++    /// Texture stretched over `rect`.
++    pub fn image(&mut self, canvas: &mut Canvas, rect: Rect, texture: TextureId) {
++        // With no region the texture size only scales `region`, so (1, 1) gives the full 0..1 UVs.
++        let params = SpriteParams { size: Some(rect.size()), align: Align::TOP_LEFT, ..Default::default() };
++        on_ui_layer(canvas, |c| c.sprite(texture, (1, 1), rect.pos(), &params));
++    }
++
++    /// Horizontal slider for `value` in `min..=max`. Returns `Some(new value)` while it is dragged
++    /// to a different value, `None` otherwise.
++    pub fn slider(&mut self, canvas: &mut Canvas, id: u64, rect: Rect, value: f32, min: f32, max: f32) -> Option<f32> {
++        let hovered = self.hover(Some(id), rect);
++        if self.mouse_pressed && hovered && self.active.is_none() {
++            self.active = Some(id);
++        }
++        let dragging = self.active == Some(id) && self.mouse_down;
++        let (lo, hi) = if min <= max { (min, max) } else { (max, min) };
++        let mut shown = value.clamp(lo, hi);
++        let mut changed = None;
++        if dragging {
++            let t = if rect.w > 0.0 { ((self.mouse_pos.x - rect.x) / rect.w).clamp(0.0, 1.0) } else { 0.0 };
++            let v = min + t * (max - min);
++            if v != value {
++                changed = Some(v);
++            }
++            shown = v;
++        }
++        if !self.mouse_down && self.active == Some(id) {
++            self.active = None;
++        }
++
++        let s = &self.style;
++        let t = if hi > lo { (shown - min) / (max - min) } else { 0.0 };
++        let fill_w = rect.w * t.clamp(0.0, 1.0);
++        let fill = if dragging || hovered { s.fill_hover } else { s.fill };
++        let (track, border, knob) = (s.track, s.border, s.text);
++        on_ui_layer(canvas, |c| {
++            c.rect(rect.pos(), rect.size(), track, Align::TOP_LEFT);
++            c.rect(rect.pos(), Vec2::new(fill_w, rect.h), fill, Align::TOP_LEFT);
++            c.rect_line(rect.pos(), rect.size(), 1.0, border, Align::TOP_LEFT);
++            c.circle(Vec2::new(rect.x + fill_w, rect.center().y), rect.h * 0.6, knob);
++        });
++        changed
++    }
++
++    /// Checkbox. Returns `Some(new state)` when clicked, `None` otherwise.
++    pub fn checkbox(&mut self, canvas: &mut Canvas, id: u64, rect: Rect, checked: bool) -> Option<bool> {
++        let hovered = self.hover(Some(id), rect);
++        let toggled = self.click(id, hovered);
++        let shown = checked != toggled;
++        let s = &self.style;
++        let (bg, border, check) = (if hovered { s.widget_hover } else { s.widget }, s.border, s.check);
++        on_ui_layer(canvas, |c| {
++            c.rect(rect.pos(), rect.size(), bg, Align::TOP_LEFT);
++            c.rect_line(rect.pos(), rect.size(), 1.0, border, Align::TOP_LEFT);
++            if shown {
++                let inset = (rect.w.min(rect.h) * 0.2).max(1.0);
++                let size = (rect.size() - Vec2::splat(inset * 2.0)).max(Vec2::ZERO);
++                c.rect(rect.pos() + Vec2::splat(inset), size, check, Align::TOP_LEFT);
++            }
++        });
++        toggled.then_some(shown)
++    }
++
++    /// Progress bar, `progress` 0..1 (clamped).
++    pub fn progress(&mut self, canvas: &mut Canvas, rect: Rect, progress: f32, color: Color) {
++        let fill = rect.w * progress.clamp(0.0, 1.0);
++        let (track, border) = (self.style.track, self.style.border);
++        on_ui_layer(canvas, |c| {
++            c.rect(rect.pos(), rect.size(), track, Align::TOP_LEFT);
++            c.rect(rect.pos(), Vec2::new(fill, rect.h), color, Align::TOP_LEFT);
++            c.rect_line(rect.pos(), rect.size(), 1.0, border, Align::TOP_LEFT);
++        });
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    /// 1920x1080 window: scale 1.5, virtual 1280x720.
++    fn canvas() -> Canvas {
++        let mut c = Canvas::new();
++        c.set_output_size(1920, 1080);
++        c.begin_frame((1920, 1080));
++        c
++    }
++
++    /// Window pixels for a virtual position (inverse of `Canvas::to_virtual`).
++    fn win(c: &Canvas, virtual_pos: Vec2) -> Vec2 {
++        virtual_pos * c.scale()
++    }
++
++    /// One frame: mouse at `at` (virtual), left button `down`.
++    fn frame(ui: &mut Ui, c: &Canvas, input: &mut Input, at: Vec2, down: bool) {
++        input.end_frame();
++        input.mouse_moved(win(c, at));
++        if input.mouse_down(MouseButton::Left) != down {
++            input.mouse_button_event(MouseButton::Left, down);
++        }
++        ui.end();
++        ui.begin(c, input);
++    }
++
++    const BTN: Rect = Rect { x: 100.0, y: 100.0, w: 200.0, h: 40.0 };
++
++    #[test]
++    fn rect_contains_and_center() {
++        let r = Rect::new(10.0, 20.0, 100.0, 50.0);
++        assert!(r.contains(Vec2::new(10.0, 20.0)));
++        assert!(r.contains(Vec2::new(110.0, 70.0)));
++        assert!(!r.contains(Vec2::new(9.0, 20.0)));
++        assert!(!r.contains(Vec2::new(111.0, 70.0)));
++        assert_eq!(r.center(), Vec2::new(60.0, 45.0));
++    }
++
++    #[test]
++    fn begin_converts_mouse_to_virtual() {
++        let c = canvas();
++        let mut input = Input::default();
++        input.mouse_moved(Vec2::new(960.0, 540.0));
++        let mut ui = Ui::new();
++        ui.begin(&c, &input);
++        assert_eq!(ui.screen_size, Vec2::new(1280.0, 720.0));
++        assert_eq!(ui.mouse_pos, Vec2::new(640.0, 360.0));
++    }
++
++    #[test]
++    fn button_clicks_on_release_over_it() {
++        let mut c = canvas();
++        let (mut ui, mut input) = (Ui::new(), Input::default());
++        frame(&mut ui, &c, &mut input, BTN.center(), true);
++        assert!(!ui.button(&mut c, 1, BTN, "Go"), "press alone is no click");
++        assert_eq!(ui.active, Some(1));
++        frame(&mut ui, &c, &mut input, BTN.center(), true);
++        assert!(!ui.button(&mut c, 1, BTN, "Go"), "holding is no click");
++        frame(&mut ui, &c, &mut input, BTN.center(), false);
++        assert!(ui.button(&mut c, 1, BTN, "Go"));
++        assert_eq!(ui.active, None);
++        frame(&mut ui, &c, &mut input, BTN.center(), false);
++        assert!(!ui.button(&mut c, 1, BTN, "Go"), "one click per press");
++    }
++
++    #[test]
++    fn button_no_click_when_released_outside() {
++        let mut c = canvas();
++        let (mut ui, mut input) = (Ui::new(), Input::default());
++        frame(&mut ui, &c, &mut input, BTN.center(), true);
++        ui.button(&mut c, 1, BTN, "Go");
++        frame(&mut ui, &c, &mut input, Vec2::new(10.0, 10.0), false);
++        assert!(!ui.button(&mut c, 1, BTN, "Go"));
++        assert_eq!(ui.active, None);
++    }
++
++    #[test]
++    fn press_outside_then_drag_in_is_no_click() {
++        let mut c = canvas();
++        let (mut ui, mut input) = (Ui::new(), Input::default());
++        frame(&mut ui, &c, &mut input, Vec2::new(10.0, 10.0), true);
++        ui.button(&mut c, 1, BTN, "Go");
++        frame(&mut ui, &c, &mut input, BTN.center(), true);
++        ui.button(&mut c, 1, BTN, "Go");
++        frame(&mut ui, &c, &mut input, BTN.center(), false);
++        assert!(!ui.button(&mut c, 1, BTN, "Go"));
++    }
++
++    #[test]
++    fn checkbox_toggles_once() {
++        let mut c = canvas();
++        let (mut ui, mut input) = (Ui::new(), Input::default());
++        let r = Rect::new(50.0, 50.0, 20.0, 20.0);
++        frame(&mut ui, &c, &mut input, r.center(), true);
++        assert_eq!(ui.checkbox(&mut c, 7, r, false), None);
++        frame(&mut ui, &c, &mut input, r.center(), false);
++        assert_eq!(ui.checkbox(&mut c, 7, r, false), Some(true));
++        frame(&mut ui, &c, &mut input, r.center(), false);
++        assert_eq!(ui.checkbox(&mut c, 7, r, true), None);
++    }
++
++    #[test]
++    fn slider_follows_drag_and_releases() {
++        let mut c = canvas();
++        let (mut ui, mut input) = (Ui::new(), Input::default());
++        let r = Rect::new(100.0, 100.0, 200.0, 20.0);
++        frame(&mut ui, &c, &mut input, Vec2::new(150.0, 110.0), true);
++        let v = ui.slider(&mut c, 2, r, 0.0, 0.0, 100.0).expect("press moves the value");
++        assert!((v - 25.0).abs() < 0.01, "{v}");
++        // dragging outside the track clamps
++        frame(&mut ui, &c, &mut input, Vec2::new(900.0, 400.0), true);
++        assert_eq!(ui.slider(&mut c, 2, r, v, 0.0, 100.0), Some(100.0));
++        frame(&mut ui, &c, &mut input, Vec2::new(900.0, 400.0), true);
++        assert_eq!(ui.slider(&mut c, 2, r, 100.0, 0.0, 100.0), None, "unchanged value is not reported");
++        frame(&mut ui, &c, &mut input, Vec2::new(150.0, 110.0), false);
++        assert_eq!(ui.slider(&mut c, 2, r, 100.0, 0.0, 100.0), None);
++        assert_eq!(ui.active, None);
++    }
++
++    #[test]
++    fn slider_with_zero_width_or_range_is_safe() {
++        let mut c = canvas();
++        let (mut ui, mut input) = (Ui::new(), Input::default());
++        frame(&mut ui, &c, &mut input, Vec2::new(10.0, 10.0), true);
++        let v = ui.slider(&mut c, 3, Rect::new(10.0, 0.0, 0.0, 20.0), 5.0, 0.0, 10.0);
++        assert!(v.is_none_or(|v| v.is_finite()));
++        let v = ui.slider(&mut c, 4, Rect::new(0.0, 0.0, 100.0, 20.0), 1.0, 1.0, 1.0);
++        assert!(v.is_none_or(|v| v.is_finite()));
++    }
++
++    #[test]
++    fn first_widget_pressed_owns_the_mouse() {
++        let mut c = canvas();
++        let (mut ui, mut input) = (Ui::new(), Input::default());
++        frame(&mut ui, &c, &mut input, BTN.center(), true);
++        ui.button(&mut c, 1, BTN, "A");
++        ui.button(&mut c, 2, BTN, "B"); // overlapping
++        assert_eq!(ui.active, Some(1));
++    }
++
++    #[test]
++    fn active_is_released_even_if_widget_disappears() {
++        let mut c = canvas();
++        let (mut ui, mut input) = (Ui::new(), Input::default());
++        frame(&mut ui, &c, &mut input, BTN.center(), true);
++        ui.button(&mut c, 1, BTN, "Go");
++        frame(&mut ui, &c, &mut input, BTN.center(), false);
++        frame(&mut ui, &c, &mut input, BTN.center(), false);
++        assert_eq!(ui.active, None);
++    }
++
++    #[test]
++    fn hovered_covers_panels_and_lasts_into_next_update() {
++        let mut c = canvas();
++        let (mut ui, mut input) = (Ui::new(), Input::default());
++        frame(&mut ui, &c, &mut input, Vec2::new(20.0, 20.0), false);
++        assert!(ui.panel(&mut c, Rect::new(0.0, 0.0, 100.0, 100.0), Color::BLACK, None));
++        assert!(ui.hovered());
++        frame(&mut ui, &c, &mut input, Vec2::new(20.0, 20.0), false);
++        assert!(ui.hovered(), "update() of the next frame still sees the UI under the cursor");
++        frame(&mut ui, &c, &mut input, Vec2::new(20.0, 20.0), false);
++        assert!(!ui.hovered(), "nothing drawn for a frame");
++    }
++
++    #[test]
++    fn widgets_keep_the_game_layer_and_transform() {
++        let mut c = canvas();
++        let mut ui = Ui::new();
++        c.set_layer(Layer::Scene);
++        c.translate(Vec2::new(50.0, 0.0));
++        let t = c.transform();
++        ui.progress(&mut c, Rect::new(0.0, 0.0, 100.0, 10.0), 0.5, Color::GREEN);
++        ui.label(&mut c, Vec2::ZERO, "hi", 16.0, Color::WHITE);
++        assert_eq!(c.layer(), Layer::Scene);
++        assert_eq!(c.transform(), t);
++        assert!(!c.layer_data(Layer::Ui).vertices.is_empty(), "widgets drawn on the UI layer");
++        assert!(c.layer_data(Layer::Scene).vertices.is_empty());
++    }
++
++    #[test]
++    fn non_interactive_widgets_do_not_take_the_mouse() {
++        let mut c = canvas();
++        let (mut ui, mut input) = (Ui::new(), Input::default());
++        frame(&mut ui, &c, &mut input, Vec2::new(5.0, 5.0), true);
++        ui.progress(&mut c, Rect::new(0.0, 0.0, 200.0, 20.0), 0.5, Color::GREEN);
++        ui.label(&mut c, Vec2::ZERO, "Hello", 24.0, Color::WHITE);
++        assert_eq!((ui.hot, ui.active), (None, None));
++    }
++}
+diff --git a/crates/spark-core/src/world.rs b/crates/spark-core/src/world.rs
+index 105354b..bb5def1 100644
+--- a/crates/spark-core/src/world.rs
++++ b/crates/spark-core/src/world.rs
+@@ -41,6 +41,8 @@ pub struct World {
+     pub window: WindowSettings,
+     /// Debug overlay (FPS, GPU, scene stats). Toggle with F1 in the runner.
+     pub debug: crate::debug::DebugOverlay,
++    /// Immediate-mode UI state (buttons, sliders, panels).
++    pub ui: crate::ui::Ui,
+     quit: bool,
+ }
+ 
+@@ -100,5 +102,6 @@ impl World {
+         self.render = RenderSettings::default();
+         self.canvas.reset();
+         self.debug = crate::debug::DebugOverlay::default();
++        self.ui = crate::ui::Ui::default();
+     }
+ }
+diff --git a/crates/spark-script/src/api.rs b/crates/spark-script/src/api.rs
+index 5c398a4..b180c72 100644
+--- a/crates/spark-script/src/api.rs
++++ b/crates/spark-script/src/api.rs
+@@ -460,6 +460,7 @@ pub(crate) fn install(lua: &Lua) -> LuaResult<()> {
+     crate::shader::install(lua, &g)?;
+     crate::tween::install(lua)?;
+     crate::debug_api::install(lua)?;
++    crate::ui_api::install(lua)?;
+     g.set("window", lua.create_userdata(LuaWindow)?)?;
+     Ok(())
+ }
+diff --git a/crates/spark-script/src/draw.rs b/crates/spark-script/src/draw.rs
+index 4cf58f0..8d26179 100644
+--- a/crates/spark-script/src/draw.rs
++++ b/crates/spark-script/src/draw.rs
+@@ -46,7 +46,7 @@ fn to_text(v: &Value, what: &str) -> LuaResult<String> {
+     }
+ }
+ 
+-fn texture_of(w: &mut World, v: &Value, what: &str) -> LuaResult<TextureId> {
++pub(crate) fn texture_of(w: &mut World, v: &Value, what: &str) -> LuaResult<TextureId> {
+     match v {
+         Value::String(s) => w.assets.load_texture(&s.to_string_lossy()).map_err(|e| rt(format!("{what}: {e}"))),
+         Value::UserData(ud) => ud
+diff --git a/crates/spark-script/src/lib.rs b/crates/spark-script/src/lib.rs
+index 6865e6b..64d8c51 100644
+--- a/crates/spark-script/src/lib.rs
++++ b/crates/spark-script/src/lib.rs
+@@ -20,6 +20,7 @@ mod debug_api;
+ mod draw;
+ mod flow;
+ mod light;
++mod ui_api;
+ mod model;
+ mod modules;
+ mod physics;
+diff --git a/crates/spark-script/src/ui_api.rs b/crates/spark-script/src/ui_api.rs
+new file mode 100644
+index 0000000..c12a9bd
+--- /dev/null
++++ b/crates/spark-script/src/ui_api.rs
+@@ -0,0 +1,113 @@
++//! Luau `ui` global: immediate-mode widgets drawn on the UI layer.
++//!
++//! ```lua
++//! function render()
++//!     if ui.button("start", 10, 10, 200, 40, "Start") then start_game() end
++//!     volume = ui.slider("volume", 10, 60, 200, 20, volume, 0, 1)
++//!     music = ui.checkbox("music", 10, 90, 20, music)
++//! end
++//! ```
++
++use std::collections::hash_map::DefaultHasher;
++use std::hash::{Hash, Hasher};
++
++use mlua::{Lua, Value};
++use spark_core::{Rect, Vec2};
++
++use crate::convert::{rt, to_color, with, LuaResult};
++
++/// Widget ids: any string or integer that stays the same between frames.
++fn widget_id(v: &Value, what: &str) -> LuaResult<u64> {
++    let mut h = DefaultHasher::new();
++    match v {
++        Value::String(s) => s.as_bytes().hash(&mut h),
++        Value::Integer(i) => i.hash(&mut h),
++        Value::Number(n) if n.fract() == 0.0 => (*n as i64).hash(&mut h),
++        _ => return Err(rt(format!("{what}: the first argument is the widget id (a string or an integer that stays the same every frame), got {}", v.type_name()))),
++    }
++    Ok(h.finish())
++}
++
++fn color_or(v: &Value, default: spark_core::Color, what: &str) -> LuaResult<spark_core::Color> {
++    if v.is_nil() { Ok(default) } else { to_color(v, what) }
++}
++
++pub(crate) fn install(lua: &Lua) -> LuaResult<()> {
++    let ui = lua.create_table()?;
++
++    ui.set(
++        "panel",
++        lua.create_function(|lua, (x, y, width, height, bg, border): (f32, f32, f32, f32, Value, Value)| {
++            with(lua, |w| {
++                let bg = color_or(&bg, w.ui.style.panel, "ui.panel color")?;
++                let border = if border.is_nil() { None } else { Some((1.0, to_color(&border, "ui.panel border")?)) };
++                Ok(w.ui.panel(&mut w.canvas, Rect::new(x, y, width, height), bg, border))
++            })
++        })?,
++    )?;
++
++    ui.set(
++        "button",
++        lua.create_function(|lua, (id, x, y, width, height, text): (Value, f32, f32, f32, f32, String)| {
++            let id = widget_id(&id, "ui.button")?;
++            with(lua, |w| Ok(w.ui.button(&mut w.canvas, id, Rect::new(x, y, width, height), &text)))
++        })?,
++    )?;
++
++    ui.set(
++        "label",
++        lua.create_function(|lua, (x, y, text, size, color): (f32, f32, String, Option<f32>, Value)| {
++            with(lua, |w| {
++                let color = color_or(&color, w.ui.style.text, "ui.label color")?;
++                w.ui.label(&mut w.canvas, Vec2::new(x, y), &text, size.unwrap_or(16.0), color);
++                Ok(())
++            })
++        })?,
++    )?;
++
++    ui.set(
++        "image",
++        lua.create_function(|lua, (x, y, width, height, texture): (f32, f32, f32, f32, Value)| {
++            with(lua, |w| {
++                let tex = crate::draw::texture_of(w, &texture, "ui.image")?;
++                w.ui.image(&mut w.canvas, Rect::new(x, y, width, height), tex);
++                Ok(())
++            })
++        })?,
++    )?;
++
++    ui.set(
++        "slider",
++        lua.create_function(
++            |lua, (id, x, y, width, height, value, min, max): (Value, f32, f32, f32, f32, f32, Option<f32>, Option<f32>)| {
++                let id = widget_id(&id, "ui.slider")?;
++                let (min, max) = (min.unwrap_or(0.0), max.unwrap_or(1.0));
++                with(lua, |w| Ok(w.ui.slider(&mut w.canvas, id, Rect::new(x, y, width, height), value, min, max).unwrap_or(value)))
++            },
++        )?,
++    )?;
++
++    ui.set(
++        "checkbox",
++        lua.create_function(|lua, (id, x, y, size, checked): (Value, f32, f32, f32, bool)| {
++            let id = widget_id(&id, "ui.checkbox")?;
++            with(lua, |w| Ok(w.ui.checkbox(&mut w.canvas, id, Rect::new(x, y, size, size), checked).unwrap_or(checked)))
++        })?,
++    )?;
++
++    ui.set(
++        "progress",
++        lua.create_function(|lua, (x, y, width, height, progress, color): (f32, f32, f32, f32, f32, Value)| {
++            with(lua, |w| {
++                let color = color_or(&color, w.ui.style.fill, "ui.progress color")?;
++                w.ui.progress(&mut w.canvas, Rect::new(x, y, width, height), progress, color);
++                Ok(())
++            })
++        })?,
++    )?;
++
++    ui.set("hovered", lua.create_function(|lua, ()| with(lua, |w| Ok(w.ui.hovered())))?)?;
++
++    lua.globals().set("ui", ui)?;
++    Ok(())
++}
+diff --git a/crates/spark-script/tests/flow.rs b/crates/spark-script/tests/flow.rs
+index beb2856..aef5c8c 100644
+--- a/crates/spark-script/tests/flow.rs
++++ b/crates/spark-script/tests/flow.rs
+@@ -84,3 +84,8 @@ fn debug_contract() {
+ fn postfx_contract() {
+     run_script("postfx.luau", 10);
+ }
++
++#[test]
++fn ui_contract() {
++    run_script("ui.luau", 10);
++}
+diff --git a/crates/spark-script/tests/scripts/ui.luau b/crates/spark-script/tests/scripts/ui.luau
+new file mode 100644
+index 0000000..7c65d3e
+--- /dev/null
++++ b/crates/spark-script/tests/scripts/ui.luau
+@@ -0,0 +1,23 @@
++-- `ui` widgets: return values, id rules, argument errors. (Mouse interaction is covered by Rust tests.)
++-- Widgets are placed away from the origin: the headless mouse sits at (0, 0).
++local volume, music = 0.5, true
++
++function render()
++    assert(ui.panel(100, 100, 300, 200) == false, "mouse is not over the panel")
++    assert(ui.panel(100, 100, 300, 200, Color.BLACK, "#ffffff") == false)
++    assert(ui.button("start", 110, 110, 200, 40, "Start") == false)
++    assert(ui.button(1, 110, 160, 200, 40, "One") == false, "integer ids work")
++    ui.label(110, 210, "Score: 1", 16, Color.WHITE)
++    ui.label(110, 230, "defaults")
++    ui.progress(110, 250, 200, 10, 0.3)
++    volume = ui.slider("volume", 110, 270, 200, 20, volume, 0, 1)
++    assert(volume == 0.5, "untouched slider returns the value")
++    music = ui.checkbox("music", 320, 270, 20, music)
++    assert(music == true, "untouched checkbox returns the state")
++    assert(ui.hovered() == false)
++    assert(not pcall(ui.button, nil, 0, 0, 10, 10, "x"), "id is required")
++    assert(not pcall(ui.button, 1.5, 0, 0, 10, 10, "x"), "fractional ids are rejected")
++    assert(not pcall(ui.image, 0, 0, 10, 10, 5), "image needs a texture")
++    assert(ui.begin == nil and ui["end"] == nil, "the engine runs the UI frame")
++    quit()
++end
+diff --git a/docs/LUAU_API.md b/docs/LUAU_API.md
+index 075084e..d9ca6e1 100644
+--- a/docs/LUAU_API.md
++++ b/docs/LUAU_API.md
+@@ -582,6 +582,38 @@ end
+ 
+ Full 2D game: `examples/starfall/main.luau`.
+ 
++## UI widgets (ui)
++
++Immediate-mode widgets on the UI layer, in the same virtual pixels as `draw` (top-left origin). Call them every
++frame from `render()` (or `update()`); they draw themselves and return the result right away. Interactive widgets take
++an **id** first: any string or integer that stays the same every frame (a click is a press and a release in
++different frames).
++
++```lua
++local volume, music = 0.5, true
++function render()
++    ui.panel(10, 10, 240, 150)
++    if ui.button("play", 20, 20, 220, 36, "Play") then start_game() end
++    volume = ui.slider("volume", 20, 70, 220, 16, volume, 0, 1)
++    music = ui.checkbox("music", 20, 100, 20, music)
++    ui.label(50, 102, "Music")
++    ui.progress(20, 135, 220, 10, hp / max_hp, "#e04040")
++end
++function update(dt)
++    if input.mouse_pressed("left") and not ui.hovered() then shoot() end   -- clicks on the UI don't shoot
++end
++```
++
++- `ui.button(id, x, y, w, h, text)` -> true on the frame it is clicked (pressed and released over it)
++- `ui.slider(id, x, y, w, h, value, min = 0, max = 1)` -> the value (changed while dragged)
++- `ui.checkbox(id, x, y, size, checked)` -> the state (flipped when clicked)
++- `ui.panel(x, y, w, h, color?, border_color?)` -> true when the mouse is over it
++- `ui.label(x, y, text, size = 16, color = white)` - text, top-left at x, y
++- `ui.image(x, y, w, h, texture)` - Texture or image path, stretched over the rect
++- `ui.progress(x, y, w, h, t, color?)` - bar filled to t (0..1)
++- `ui.hovered()` -> true when the mouse is over UI drawn this or the previous frame
++- Widgets never change `draw.layer` or the draw transform. Only the left mouse button interacts.
++
+ ## Input and time
+ 
+ - `input.down(key)`, `input.pressed(key)` (this frame), `input.released(key)`
+diff --git a/docs/spark.d.luau b/docs/spark.d.luau
+index 5dffcdf..0fb962c 100644
+--- a/docs/spark.d.luau
++++ b/docs/spark.d.luau
+@@ -520,6 +520,19 @@ declare draw: {
+     spark_badge: (opts: { align: Align?, margin: number?, width: number?, alpha: number?, x: number?, y: number? }?) -> (boolean, boolean),
+ }
+ 
++type WidgetId = string | number
++
++declare ui: {
++    button: (id: WidgetId, x: number, y: number, w: number, h: number, text: string) -> boolean,
++    slider: (id: WidgetId, x: number, y: number, w: number, h: number, value: number, min: number?, max: number?) -> number,
++    checkbox: (id: WidgetId, x: number, y: number, size: number, checked: boolean) -> boolean,
++    panel: (x: number, y: number, w: number, h: number, color: ColorLike?, border: ColorLike?) -> boolean,
++    label: (x: number, y: number, text: string, size: number?, color: ColorLike?) -> (),
++    image: (x: number, y: number, w: number, h: number, texture: Texture | string) -> (),
++    progress: (x: number, y: number, w: number, h: number, t: number, color: ColorLike?) -> (),
++    hovered: () -> boolean,
++}
++
+ declare screen: {
+     width: number,
+     height: number,
